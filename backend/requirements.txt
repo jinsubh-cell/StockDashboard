@@ -1,0 +1,10 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+finance-datareader==0.9.90
+pykrx==1.0.45
+numpy>=1.26.0
+pandas>=2.1.0
+scipy>=1.11.0
+ta-lib>=0.6.0
+backtrader>=1.9.78
+quantstats>=0.0.64
