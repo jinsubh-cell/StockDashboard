@@ -123,11 +123,12 @@ export function renderStockDetail(code) {
           </style>
           <div class="ma-legend" id="ma-legend">
             <span class="ma-legend-item"><span class="ma-legend-line" style="background:#ff4757;"></span>5일</span>
-            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#ffa502;"></span>20일</span>
-            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#00d26a;"></span>60일</span>
-            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#0984e3;"></span>120일</span>
-            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#6c5ce7;"></span>224일</span>
-            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#b2bec3;"></span>448일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#ffa502;"></span>15일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#e84393;"></span>33일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#0984e3;"></span>56일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#00b894; height:4px;"></span>112일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#dfe6e9; height:4px;"></span>224일</span>
+            <span class="ma-legend-item"><span class="ma-legend-line" style="background:#636e72; border-top:2px dashed #636e72; height:0;"></span>448일</span>
           </div>
           <div class="chart-wrapper">
             <canvas id="detail-chart"></canvas>
@@ -295,21 +296,23 @@ export function renderDetailChart(stock) {
       return `${dt.getMonth() + 1}/${dt.getDate()}`;
     });
 
-    // Compute SMAs for line chart (use full array to align with displayData indices)
-    const sma5Line = computeSMA(closes, 5);
-    const sma20Line = computeSMA(closes, 20);
-    const sma60Line = computeSMA(closes, 60);
-    const sma120Line = computeSMA(closes, 120);
-    const sma224Line = computeSMA(closes, 224);
-    const sma448Line = computeSMA(closes, 448);
+    // Compute EMAs for line chart (주식단테 설정: EMA 5,15,33,56,112,224,448)
+    const ema5Line = computeEMA(closes, 5);
+    const ema15Line = computeEMA(closes, 15);
+    const ema33Line = computeEMA(closes, 33);
+    const ema56Line = computeEMA(closes, 56);
+    const ema112Line = computeEMA(closes, 112);
+    const ema224Line = computeEMA(closes, 224);
+    const ema448Line = computeEMA(closes, 448);
 
     const extraDatasets = [
-      { label: 'SMA 5', data: sma5Line, borderColor: '#ff4757', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
-      { label: 'SMA 20', data: sma20Line, borderColor: '#ffa502', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
-      { label: 'SMA 60', data: sma60Line, borderColor: '#00d26a', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
-      { label: 'SMA 120', data: sma120Line, borderColor: '#0984e3', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
-      { label: 'SMA 224', data: sma224Line, borderColor: '#6c5ce7', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
-      { label: 'SMA 448', data: sma448Line, borderColor: '#b2bec3', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 5', data: ema5Line, borderColor: '#ff4757', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 15', data: ema15Line, borderColor: '#ffa502', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 33', data: ema33Line, borderColor: '#e84393', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 56', data: ema56Line, borderColor: '#0984e3', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 112', data: ema112Line, borderColor: '#00b894', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 224', data: ema224Line, borderColor: '#dfe6e9', borderWidth: 2.5, pointRadius: 0, tension: 0.3, fill: false },
+      { label: 'EMA 448', data: ema448Line, borderColor: '#636e72', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0.3, fill: false },
     ];
 
     createLineChart('detail-chart', lineDates, lineData, {
@@ -327,14 +330,16 @@ export function renderDetailChart(stock) {
   } else {
     // Candle chart with indicators
 
-    // Compute SMAs on full aggregated series (use full array to align with displayData indices)
-    const sma5 = computeSMA(closes, 5);
-    const sma20 = computeSMA(closes, 20);
-    const sma60 = computeSMA(closes, 60);
-    const sma120 = computeSMA(closes, 120);
-    const sma224 = computeSMA(closes, 224);
-    const sma448 = computeSMA(closes, 448);
+    // Compute EMAs on full aggregated series (주식단테 설정: EMA 5,15,33,56,112,224,448)
+    const ema5 = computeEMA(closes, 5);
+    const ema15 = computeEMA(closes, 15);
+    const ema33 = computeEMA(closes, 33);
+    const ema56 = computeEMA(closes, 56);
+    const ema112 = computeEMA(closes, 112);
+    const ema224 = computeEMA(closes, 224);
+    const ema448 = computeEMA(closes, 448);
 
+    // 일목균형표: 선행스펜1, 선행스펜2만 표시 (구름대), 전환선/기준선 숨김
     const tenkan = computeDonchian(highs, lows, 9);
     const kijun = computeDonchian(highs, lows, 26);
     const spanA = tenkan.map((t, i) => t != null && kijun[i] != null ? (t + kijun[i]) / 2 : null);
@@ -342,20 +347,19 @@ export function renderDetailChart(stock) {
 
     const shiftedSpanA = new Array(26).fill(null).concat(spanA).slice(0, aggregated.length);
     const shiftedSpanB = new Array(26).fill(null).concat(spanB).slice(0, aggregated.length);
-    const tenkanDisp = tenkan;
-    const kijunDisp = kijun;
 
     const extraDatasets = [
-      { type: 'line', label: '선행스팬1', data: displayData.map((d, i) => ({ x: d.x, y: shiftedSpanA[i] })), borderColor: 'rgba(0, 210, 106, 0.4)', borderWidth: 1, pointRadius: 0, tension: 0.2, fill: false },
-      { type: 'line', label: '선행스팬2', data: displayData.map((d, i) => ({ x: d.x, y: shiftedSpanB[i] })), borderColor: 'rgba(255, 71, 87, 0.4)', borderWidth: 1, pointRadius: 0, tension: 0.2, fill: '-1', backgroundColor: 'rgba(108, 92, 231, 0.1)' },
-      { type: 'line', label: '전환선', data: displayData.map((d, i) => ({ x: d.x, y: tenkanDisp[i] })), borderColor: '#00cec9', borderWidth: 1.5, pointRadius: 0, tension: 0.2, hidden: true },
-      { type: 'line', label: '기준선', data: displayData.map((d, i) => ({ x: d.x, y: kijunDisp[i] })), borderColor: '#e17055', borderWidth: 1.5, pointRadius: 0, tension: 0.2, hidden: true },
-      { type: 'line', label: 'SMA 5', data: displayData.map((d, i) => ({ x: d.x, y: sma5[i] })), borderColor: '#ff4757', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
-      { type: 'line', label: 'SMA 20', data: displayData.map((d, i) => ({ x: d.x, y: sma20[i] })), borderColor: '#ffa502', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
-      { type: 'line', label: 'SMA 60', data: displayData.map((d, i) => ({ x: d.x, y: sma60[i] })), borderColor: '#00d26a', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
-      { type: 'line', label: 'SMA 120', data: displayData.map((d, i) => ({ x: d.x, y: sma120[i] })), borderColor: '#0984e3', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
-      { type: 'line', label: 'SMA 224', data: displayData.map((d, i) => ({ x: d.x, y: sma224[i] })), borderColor: '#6c5ce7', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
-      { type: 'line', label: 'SMA 448', data: displayData.map((d, i) => ({ x: d.x, y: sma448[i] })), borderColor: '#b2bec3', borderWidth: 1.5, pointRadius: 0, tension: 0.3, hidden: false },
+      // 일목균형표 구름대 (파란색 통일, 채우기)
+      { type: 'line', label: '선행스팬1', data: displayData.map((d, i) => ({ x: d.x, y: shiftedSpanA[i] })), borderColor: 'rgba(52, 152, 219, 0.5)', borderWidth: 1, pointRadius: 0, tension: 0.2, fill: false },
+      { type: 'line', label: '선행스팬2', data: displayData.map((d, i) => ({ x: d.x, y: shiftedSpanB[i] })), borderColor: 'rgba(52, 152, 219, 0.5)', borderWidth: 1, pointRadius: 0, tension: 0.2, fill: '-1', backgroundColor: 'rgba(52, 152, 219, 0.08)' },
+      // EMA 이동평균선 (주식단테 설정)
+      { type: 'line', label: 'EMA 5', data: displayData.map((d, i) => ({ x: d.x, y: ema5[i] })), borderColor: '#ff4757', borderWidth: 1, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 15', data: displayData.map((d, i) => ({ x: d.x, y: ema15[i] })), borderColor: '#ffa502', borderWidth: 1, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 33', data: displayData.map((d, i) => ({ x: d.x, y: ema33[i] })), borderColor: '#e84393', borderWidth: 1, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 56', data: displayData.map((d, i) => ({ x: d.x, y: ema56[i] })), borderColor: '#0984e3', borderWidth: 1, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 112', data: displayData.map((d, i) => ({ x: d.x, y: ema112[i] })), borderColor: '#00b894', borderWidth: 2.5, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 224', data: displayData.map((d, i) => ({ x: d.x, y: ema224[i] })), borderColor: '#dfe6e9', borderWidth: 2.5, pointRadius: 0, tension: 0.3, hidden: false },
+      { type: 'line', label: 'EMA 448', data: displayData.map((d, i) => ({ x: d.x, y: ema448[i] })), borderColor: '#636e72', borderWidth: 1.5, borderDash: [6, 4], pointRadius: 0, tension: 0.3, hidden: false },
     ];
 
     createCandlestickChart('detail-chart', displayData, {
@@ -474,6 +478,23 @@ function aggregateOHLC(ohlcData, interval) {
 
 function computeSMA(data, window) {
   return data.map((_, i) => i < window - 1 ? null : data.slice(i - window + 1, i + 1).reduce((a, b) => a + b) / window);
+}
+
+function computeEMA(data, period) {
+  const k = 2 / (period + 1);
+  const result = new Array(data.length).fill(null);
+  // Start EMA from the first SMA value
+  let sum = 0;
+  for (let i = 0; i < period && i < data.length; i++) {
+    sum += data[i];
+  }
+  if (period <= data.length) {
+    result[period - 1] = sum / period;
+    for (let i = period; i < data.length; i++) {
+      result[i] = data[i] * k + result[i - 1] * (1 - k);
+    }
+  }
+  return result;
 }
 
 function computeDonchian(highs, lows, period) {
