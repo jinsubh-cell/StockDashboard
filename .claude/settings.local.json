@@ -66,7 +66,17 @@
       "Bash(curl -s https://www.youtube.com/watch?v=7gEfLJz8mew)",
       "Bash(curl -s \"https://www.youtube.com/api/timedtext?v=7gEfLJz8mew&ei=dzK7aZnvFNS4pt8PkrabmAo&caps=asr&opi=112496729&exp=xpe&xoaf=5&xowf=1&hl=ko&ip=0.0.0.0&ipbits=0&expire=1773901031&sparams=ip,ipbits,expire,v,ei,caps,opi,exp,xoaf&signature=2BF60CD3292BB4B7CA2832E09E55531B4301ABC0.A4701F5836BCAC00F79261F8DA5D893E79F14AEF&key=yt8&kind=asr&lang=ko&fmt=json3\")",
       "Bash(curl -s \"https://www.youtube.com/api/timedtext?v=7gEfLJz8mew&ei=dzK7aZnvFNS4pt8PkrabmAo&caps=asr&opi=112496729&exp=xpe&xoaf=5&xowf=1&hl=ko&ip=0.0.0.0&ipbits=0&expire=1773901031&sparams=ip,ipbits,expire,v,ei,caps,opi,exp,xoaf&signature=2BF60CD3292BB4B7CA2832E09E55531B4301ABC0.A4701F5836BCAC00F79261F8DA5D893E79F14AEF&key=yt8&kind=asr&lang=ko\")",
-      "Bash(python3 -c \":*)"
+      "Bash(python3 -c \":*)",
+      "Bash(xargs grep:*)",
+      "Bash(npm install:*)",
+      "Bash(python -c \"from main import app; print\\(''Import OK''\\)\")",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(curl -s http://127.0.0.1:8000/health)",
+      "Bash(netstat -aon)",
+      "Bash(taskkill //F //PID 5380)",
+      "Bash(taskkill //F //PID 14744)",
+      "Bash(taskkill //F //PID 11320)",
+      "Bash(python -m uvicorn main:app --host 127.0.0.1 --port 8000)"
     ]
   }
 }
