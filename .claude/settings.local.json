@@ -76,7 +76,10 @@
       "Bash(taskkill //F //PID 5380)",
       "Bash(taskkill //F //PID 14744)",
       "Bash(taskkill //F //PID 11320)",
-      "Bash(python -m uvicorn main:app --host 127.0.0.1 --port 8000)"
+      "Bash(python -m uvicorn main:app --host 127.0.0.1 --port 8000)",
+      "Bash(gh repo:*)",
+      "Bash(gh auth:*)",
+      "Bash(git push:*)"
     ]
   }
 }
