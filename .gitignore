@@ -7,3 +7,6 @@ __pycache__/
 .bkit/
 *.token.json
 .kiwoom_token.json
+
+# Claude Code
+.claude/
