@@ -15,10 +15,10 @@ const defaultOptions = {
     plugins: {
         legend: { display: false },
         tooltip: {
-            backgroundColor: 'rgba(22, 27, 34, 0.95)',
-            titleColor: '#e6edf3',
-            bodyColor: '#8b949e',
-            borderColor: 'rgba(48, 54, 61, 0.8)',
+            backgroundColor: 'rgba(255, 255, 255, 0.97)',
+            titleColor: '#1a1d23',
+            bodyColor: '#5f6876',
+            borderColor: 'rgba(0, 0, 0, 0.1)',
             borderWidth: 1,
             padding: 12,
             cornerRadius: 8,
@@ -32,13 +32,13 @@ const defaultOptions = {
     },
     scales: {
         x: {
-            grid: { color: 'rgba(48, 54, 61, 0.3)', drawBorder: false },
-            ticks: { color: '#6e7681', font: { size: 11, family: "'Inter', sans-serif" }, maxRotation: 0 }
+            grid: { color: 'rgba(0, 0, 0, 0.06)', drawBorder: false },
+            ticks: { color: '#8b95a5', font: { size: 11, family: "'Inter', sans-serif" }, maxRotation: 0 }
         },
         y: {
-            grid: { color: 'rgba(48, 54, 61, 0.3)', drawBorder: false },
+            grid: { color: 'rgba(0, 0, 0, 0.06)', drawBorder: false },
             ticks: {
-                color: '#6e7681',
+                color: '#8b95a5',
                 font: { size: 11, family: "'Inter', sans-serif" },
                 callback: function (value) {
                     return value.toLocaleString('ko-KR');

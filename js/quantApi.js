@@ -3,7 +3,8 @@
 // Communicates with the FastAPI backend
 // ==========================================
 
-const API_BASE = '';
+// Auto-detect backend URL: same host, port 8000
+const API_BASE = window.location.port === '8000' ? '' : `http://${window.location.hostname}:8000`;
 
 let _backendDown = false;
 let _backendDownSince = 0;
@@ -15,10 +16,14 @@ async function fetchApi(endpoint, options = {}, retries = 1) {
         return { error: '백엔드 서버에 연결할 수 없습니다.' };
     }
 
+    // Longer timeout for endpoints that wait for WS connection
+    const isLongOp = endpoint.includes('/start') || endpoint.includes('/stop') || endpoint.includes('/scan');
+    const timeoutMs = isLongOp ? 20000 : 5000;
+
     for (let attempt = 0; attempt <= retries; attempt++) {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
             const res = await fetch(`${API_BASE}${endpoint}`, {
                 headers: { 'Content-Type': 'application/json', ...options.headers },
@@ -35,9 +40,11 @@ async function fetchApi(endpoint, options = {}, retries = 1) {
                 await new Promise(r => setTimeout(r, 300));
                 continue;
             }
-            // Mark backend as down to avoid repeated slow failures
-            _backendDown = true;
-            _backendDownSince = Date.now();
+            // Only mark backend as down for network errors, not timeouts on long ops
+            if (!isLongOp) {
+                _backendDown = true;
+                _backendDownSince = Date.now();
+            }
             console.error(`API call failed: ${endpoint}`, err);
             return { error: err.message };
         }
@@ -97,6 +104,140 @@ export async function getFactorRanking(params = {}) {
         volatility_w: params.volatility_w || 0.20,
     });
     return fetchApi(`/api/factor/ranking?${query}`);
+}
+
+// --- Trading ---
+export async function getTradingStatus() {
+    return fetchApi('/api/trading/status');
+}
+
+export async function loginKiwoom() {
+    return fetchApi('/api/trading/login', { method: 'POST' });
+}
+
+export async function logoutKiwoom() {
+    return fetchApi('/api/trading/logout', { method: 'POST' });
+}
+
+export async function getAccountSummary() {
+    return fetchApi('/api/trading/account-summary');
+}
+
+export async function placeOrder(params) {
+    return fetchApi('/api/trading/order', {
+        method: 'POST',
+        body: JSON.stringify(params),
+    });
+}
+
+export async function modifyOrder(params) {
+    return fetchApi('/api/trading/order/modify', {
+        method: 'POST',
+        body: JSON.stringify(params),
+    });
+}
+
+export async function cancelOrder(params) {
+    return fetchApi('/api/trading/order/cancel', {
+        method: 'POST',
+        body: JSON.stringify(params),
+    });
+}
+
+export async function getAccountBalance() {
+    return fetchApi('/api/trading/balance');
+}
+
+export async function getOrderHistory() {
+    return fetchApi('/api/trading/orders');
+}
+
+export async function getRealtimePrice(code) {
+    return fetchApi(`/api/trading/realtime/${code}`);
+}
+
+// --- Scalping ---
+export async function getScalpingStatus() {
+    return fetchApi('/api/scalping/status');
+}
+
+export async function startScalping(codes) {
+    // Reset backend-down flag for explicit user action
+    _backendDown = false;
+    return fetchApi('/api/scalping/start', {
+        method: 'POST',
+        body: JSON.stringify({ codes }),
+    });
+}
+
+export async function stopScalping() {
+    _backendDown = false;
+    return fetchApi('/api/scalping/stop', { method: 'POST' });
+}
+
+export async function getScalpingConfig() {
+    return fetchApi('/api/scalping/config');
+}
+
+export async function updateScalpingConfig(config) {
+    return fetchApi('/api/scalping/config', {
+        method: 'POST',
+        body: JSON.stringify({ config }),
+    });
+}
+
+export async function getScalpingSignals() {
+    return fetchApi('/api/scalping/signals');
+}
+
+export async function getScalpingTrades() {
+    return fetchApi('/api/scalping/trades');
+}
+
+export async function scanScalpingPicks(force = false) {
+    return fetchApi(`/api/scalping/picker/scan?force=${force}`);
+}
+
+export async function getPickerConfig() {
+    return fetchApi('/api/scalping/picker/config');
+}
+
+export async function updatePickerConfig(config) {
+    return fetchApi('/api/scalping/picker/config', {
+        method: 'POST',
+        body: JSON.stringify({ config }),
+    });
+}
+
+// --- Auto Scalping (완전 자동 매매) ---
+export async function getAutoScalpingStatus() {
+    return fetchApi('/api/auto-scalping/status');
+}
+
+export async function startAutoScalping() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/start', { method: 'POST' });
+}
+
+export async function stopAutoScalping() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/stop', { method: 'POST' });
+}
+
+export async function getAutoScalpingConfig() {
+    return fetchApi('/api/auto-scalping/config');
+}
+
+export async function updateAutoScalpingConfig(config) {
+    return fetchApi('/api/auto-scalping/config', {
+        method: 'POST',
+        body: JSON.stringify({ config }),
+    });
+}
+
+export async function forceAutoScan() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/scan', { method: 'POST' });
 }
 
 // --- Health Check ---

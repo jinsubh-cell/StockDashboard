@@ -321,10 +321,10 @@ function renderBacktestResults(result) {
             options: {
                 responsive: true, maintainAspectRatio: false,
                 interaction: { intersect: false, mode: 'index' },
-                plugins: { legend: { display: true, labels: { color: '#8b949e' } }, tooltip: { backgroundColor: 'rgba(22,27,34,0.95)', titleColor: '#e6edf3', bodyColor: '#8b949e', borderColor: 'rgba(48,54,61,0.8)', borderWidth: 1, padding: 10, callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}원` } } },
+                plugins: { legend: { display: true, labels: { color: '#5f6876' } }, tooltip: { backgroundColor: 'rgba(255,255,255,0.97)', titleColor: '#1a1d23', bodyColor: '#5f6876', borderColor: 'rgba(0,0,0,0.1)', borderWidth: 1, padding: 10, callbacks: { label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toLocaleString()}원` } } },
                 scales: {
-                    x: { grid: { color: 'rgba(48,54,61,0.3)' }, ticks: { color: '#6e7681', maxRotation: 0, maxTicksLimit: 12 } },
-                    y: { grid: { color: 'rgba(48,54,61,0.3)' }, ticks: { color: '#6e7681', callback: v => (v / 10000).toFixed(0) + '만' } }
+                    x: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#8b95a5', maxRotation: 0, maxTicksLimit: 12 } },
+                    y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#8b95a5', callback: v => (v / 10000).toFixed(0) + '만' } }
                 }
             }
         });

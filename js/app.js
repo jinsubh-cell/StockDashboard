@@ -12,7 +12,9 @@ import { renderTechnicalPage } from './technicalPage.js';
 import { renderBacktestPage } from './backtestPage.js';
 import { renderFactorPage } from './factorPage.js';
 import { renderScreenerPage } from './screenerPage.js';
-import { getIndices, getStocks, getStockDetail, getStockHistory, searchStocksApi } from './quantApi.js';
+import { renderTradingPage } from './tradingPage.js';
+import { renderScalpingPage } from './scalpingPage.js';
+import { getIndices, getStocks, getStockDetail, getStockHistory, searchStocksApi, loginKiwoom, logoutKiwoom, getAccountSummary } from './quantApi.js';
 import { updateStockDetailDOM } from './stockDetail.js';
 
 let pollingInterval = null;
@@ -49,6 +51,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  // Initialize account panel
+  initAccountPanel();
+
   // Start polling
   startPolling();
 });
@@ -57,6 +62,181 @@ window.addEventListener('hashchange', () => {
   handleRoute();
   startPolling();
 });
+
+// --- Account Panel ---
+let _accountRefreshTimer = null;
+
+function initAccountPanel() {
+  const loginBtn = document.getElementById('account-login-btn');
+  const statusEl = document.getElementById('account-status');
+  const dropdown = document.getElementById('account-dropdown');
+  const refreshBtn = document.getElementById('dd-refresh-btn');
+  const logoutBtn = document.getElementById('dd-logout-btn');
+
+  // Toggle dropdown on status click
+  statusEl.addEventListener('click', () => {
+    dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+  });
+
+  // Close dropdown on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#account-panel')) {
+      dropdown.style.display = 'none';
+    }
+  });
+
+  // Login button
+  loginBtn.addEventListener('click', async () => {
+    const btnText = document.getElementById('account-btn-text');
+    const isLoggedIn = loginBtn.dataset.loggedIn === 'true';
+
+    if (isLoggedIn) {
+      // Toggle dropdown instead
+      dropdown.style.display = dropdown.style.display === 'none' ? 'block' : 'none';
+      return;
+    }
+
+    btnText.textContent = '연결 중...';
+    loginBtn.disabled = true;
+
+    const result = await loginKiwoom();
+    loginBtn.disabled = false;
+
+    if (result.success) {
+      refreshAccountPanel();
+    } else {
+      btnText.textContent = '로그인';
+      // Show error inline instead of blocking alert
+      const label = document.getElementById('account-label');
+      label.textContent = result.message || '연결 실패';
+      label.style.color = '#ef4444';
+      setTimeout(() => { label.style.color = ''; refreshAccountPanel(); }, 3000);
+    }
+  });
+
+  // Refresh button in dropdown
+  refreshBtn.addEventListener('click', () => {
+    refreshAccountPanel();
+  });
+
+  // Logout button
+  logoutBtn.addEventListener('click', async () => {
+    await logoutKiwoom();
+    dropdown.style.display = 'none';
+    updateAccountUI({
+      logged_in: false,
+      simulation: false,
+      ws_connected: false,
+      has_keys: true,
+      balance: null,
+    });
+  });
+
+  // Initial fetch — auto-login if keys are available but not logged in
+  refreshAccountPanel().then(async () => {
+    const status = await getAccountSummary();
+    if (status && !status.error && status.has_keys && !status.logged_in) {
+      // Auto-login attempt
+      const result = await loginKiwoom();
+      if (result.success) {
+        refreshAccountPanel();
+      }
+    }
+  });
+
+  // Auto-refresh every 30s (more frequent for real-time trading)
+  _accountRefreshTimer = setInterval(refreshAccountPanel, 30000);
+}
+
+async function refreshAccountPanel() {
+  const data = await getAccountSummary();
+  if (!data.error) {
+    updateAccountUI(data);
+  }
+}
+
+function updateAccountUI(data) {
+  const dot = document.getElementById('account-dot');
+  const label = document.getElementById('account-label');
+  const loginBtn = document.getElementById('account-login-btn');
+  const btnText = document.getElementById('account-btn-text');
+  const balanceMini = document.getElementById('account-balance-mini');
+  const cashDisplay = document.getElementById('account-cash-display');
+
+  // Dropdown elements
+  const ddTitle = document.getElementById('dropdown-title');
+  const ddMode = document.getElementById('dropdown-mode');
+  const ddCash = document.getElementById('dd-cash');
+  const ddEval = document.getElementById('dd-eval');
+  const ddPnl = document.getElementById('dd-pnl');
+  const ddPnlPct = document.getElementById('dd-pnl-pct');
+  const ddHoldings = document.getElementById('dd-holdings');
+  const ddWsDot = document.getElementById('dd-ws-dot');
+  const ddWsLabel = document.getElementById('dd-ws-label');
+
+  if (data.logged_in) {
+    // Online state
+    const isSim = data.simulation;
+    dot.className = 'account-status-dot ' + (isSim ? 'simulation' : 'online');
+    label.textContent = isSim ? '모의투자' : '실거래';
+    loginBtn.dataset.loggedIn = 'true';
+    loginBtn.classList.add('logged-in');
+    btnText.textContent = '계좌';
+
+    // Mode badge in dropdown
+    ddMode.textContent = isSim ? '모의투자' : '실거래';
+    ddMode.className = 'account-dropdown-mode ' + (isSim ? 'sim' : 'live');
+
+    // Balance
+    if (data.balance) {
+      balanceMini.style.display = '';
+      cashDisplay.textContent = formatPrice(data.balance.cash) + '원';
+
+      ddCash.textContent = formatPrice(data.balance.cash) + '원';
+      ddEval.textContent = formatPrice(data.balance.total_eval) + '원';
+
+      const pnlColor = data.balance.total_pnl >= 0 ? '#00b894' : '#ef4444';
+      const pnlSign = data.balance.total_pnl >= 0 ? '+' : '';
+      ddPnl.innerHTML = `<span style="color:${pnlColor}">${pnlSign}${formatPrice(data.balance.total_pnl)}원</span>`;
+      ddPnlPct.innerHTML = `<span style="color:${pnlColor}">${pnlSign}${data.balance.total_pnl_pct}%</span>`;
+      ddHoldings.textContent = data.balance.holding_count + '종목';
+    } else {
+      balanceMini.style.display = 'none';
+      if (data.balance_error) {
+        ddCash.innerHTML = `<span style="color:#ef4444; font-size:0.85em;">${data.balance_error}</span>`;
+      } else {
+        ddCash.textContent = '조회 중...';
+      }
+      ddEval.textContent = '-';
+      ddPnl.textContent = '-';
+      ddPnlPct.textContent = '-';
+      ddHoldings.textContent = '-';
+    }
+
+    // WebSocket status
+    ddWsDot.className = 'account-ws-dot' + (data.ws_connected ? ' connected' : '');
+    ddWsLabel.textContent = data.ws_connected ? 'WS 연결됨' : 'WS 미연결';
+
+  } else {
+    // Offline state
+    dot.className = 'account-status-dot offline';
+    label.textContent = data.has_keys ? '미연결' : 'API키 없음';
+    loginBtn.dataset.loggedIn = 'false';
+    loginBtn.classList.remove('logged-in');
+    btnText.textContent = '로그인';
+    balanceMini.style.display = 'none';
+
+    ddMode.textContent = '';
+    ddMode.className = 'account-dropdown-mode';
+    ddCash.textContent = '-';
+    ddEval.textContent = '-';
+    ddPnl.textContent = '-';
+    ddPnlPct.textContent = '-';
+    ddHoldings.textContent = '-';
+    ddWsDot.className = 'account-ws-dot';
+    ddWsLabel.textContent = 'WS 미연결';
+  }
+}
 
 // --- Routing ---
 function handleRoute() {
@@ -95,6 +275,14 @@ function handleRoute() {
     setPageTitle('AI 조건검색');
     setActiveNav('nav-screener');
     renderScreenerPage();
+  } else if (hash === '#/trading') {
+    setPageTitle('주식 거래');
+    setActiveNav('nav-trading');
+    renderTradingPage();
+  } else if (hash === '#/scalping') {
+    setPageTitle('초단타 스캘핑');
+    setActiveNav('nav-scalping');
+    renderScalpingPage();
   } else if (hash === '#/watchlist') {
     setPageTitle('관심 종목');
     setActiveNav('nav-watchlist');

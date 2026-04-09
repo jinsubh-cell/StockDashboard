@@ -236,8 +236,8 @@ function renderFactorResults(rankings) {
                 responsive: true, maintainAspectRatio: false, indexAxis: 'y',
                 plugins: { legend: { display: false } },
                 scales: {
-                    x: { grid: { color: 'rgba(48,54,61,0.3)' }, ticks: { color: '#6e7681' }, max: 100 },
-                    y: { grid: { display: false }, ticks: { color: '#e6edf3', font: { size: 12 } } }
+                    x: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#8b95a5' }, max: 100 },
+                    y: { grid: { display: false }, ticks: { color: '#1a1d23', font: { size: 12 } } }
                 }
             }
         });

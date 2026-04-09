@@ -111,6 +111,21 @@
                     </svg>
                     <span>조건검색</span>
                 </a>
+                <a href="#/trading" class="nav-item" data-page="trading" id="nav-trading">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="1" x2="12" y2="23" />
+                        <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+                    </svg>
+                    <span>주식 거래</span>
+                </a>
+                <a href="#/scalping" class="nav-item" data-page="scalping" id="nav-scalping">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+                    </svg>
+                    <span>초단타 스캘핑</span>
+                </a>
                 <a href="#/watchlist" class="nav-item" data-page="watchlist" id="nav-watchlist">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                         stroke-linecap="round" stroke-linejoin="round">
@@ -144,6 +159,43 @@
                     <h1 class="page-title" id="page-title">대시보드</h1>
                 </div>
                 <div class="header-right" style="display:flex; align-items:center;">
+                    <!-- Account Panel -->
+                    <div class="account-panel" id="account-panel">
+                        <div class="account-status" id="account-status">
+                            <div class="account-status-dot offline" id="account-dot"></div>
+                            <span id="account-label">미연결</span>
+                        </div>
+                        <div class="account-balance-mini" id="account-balance-mini" style="display:none;">
+                            <span class="account-cash" id="account-cash-display">-</span>
+                        </div>
+                        <button class="btn btn-outline account-btn" id="account-login-btn" title="키움 로그인">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+                                <polyline points="10 17 15 12 10 7"/>
+                                <line x1="15" y1="12" x2="3" y2="12"/>
+                            </svg>
+                            <span id="account-btn-text">로그인</span>
+                        </button>
+                        <div class="account-dropdown" id="account-dropdown" style="display:none;">
+                            <div class="account-dropdown-header">
+                                <div class="account-dropdown-title" id="dropdown-title">계좌 정보</div>
+                                <div class="account-dropdown-mode" id="dropdown-mode"></div>
+                            </div>
+                            <div class="account-dropdown-body" id="dropdown-body">
+                                <div class="account-info-row"><span>예수금</span><span id="dd-cash">-</span></div>
+                                <div class="account-info-row"><span>총평가</span><span id="dd-eval">-</span></div>
+                                <div class="account-info-row"><span>총손익</span><span id="dd-pnl">-</span></div>
+                                <div class="account-info-row"><span>손익률</span><span id="dd-pnl-pct">-</span></div>
+                                <div class="account-info-row"><span>보유종목</span><span id="dd-holdings">-</span></div>
+                            </div>
+                            <div class="account-dropdown-footer">
+                                <div class="account-ws-status"><span class="account-ws-dot" id="dd-ws-dot"></span> <span id="dd-ws-label">WebSocket</span></div>
+                                <button class="btn btn-outline account-dropdown-btn" id="dd-refresh-btn">새로고침</button>
+                                <button class="btn account-dropdown-btn account-logout-btn" id="dd-logout-btn">로그아웃</button>
+                            </div>
+                        </div>
+                    </div>
+
                     <button class="btn btn-outline" id="refresh-data-btn"
                         style="margin-right: 15px; display:flex; align-items:center; gap:6px;">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"

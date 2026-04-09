@@ -6,46 +6,46 @@
 /* ---- CSS Variables (Design Tokens) ---- */
 :root {
     /* Background Colors */
-    --bg-primary: #0d1117;
-    --bg-secondary: #161b22;
-    --bg-tertiary: #1c2333;
-    --bg-card: #161b22;
-    --bg-card-hover: #1c2333;
-    --bg-sidebar: #0d1117;
-    --bg-input: #1c2333;
+    --bg-primary: #f8f9fa;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #f0f2f5;
+    --bg-card: #ffffff;
+    --bg-card-hover: #f5f6f8;
+    --bg-sidebar: #ffffff;
+    --bg-input: #f0f2f5;
 
     /* Text Colors */
-    --text-primary: #e6edf3;
-    --text-secondary: #8b949e;
-    --text-tertiary: #6e7681;
-    --text-link: #79c0ff;
+    --text-primary: #1a1d23;
+    --text-secondary: #5f6876;
+    --text-tertiary: #8b95a5;
+    --text-link: #4a6cf7;
 
     /* Accent Colors */
     --accent-primary: #6c5ce7;
-    --accent-primary-light: #a29bfe;
-    --accent-secondary: #00cec9;
+    --accent-primary-light: #8b7cf0;
+    --accent-secondary: #00b894;
 
     /* Stock Colors */
-    --color-up: #ff4757;
-    --color-up-bg: rgba(255, 71, 87, 0.1);
-    --color-up-border: rgba(255, 71, 87, 0.3);
-    --color-down: #0984e3;
-    --color-down-bg: rgba(9, 132, 227, 0.1);
-    --color-down-border: rgba(9, 132, 227, 0.3);
-    --color-neutral: #ffa502;
-    --color-neutral-bg: rgba(255, 165, 2, 0.1);
+    --color-up: #e53935;
+    --color-up-bg: rgba(229, 57, 53, 0.08);
+    --color-up-border: rgba(229, 57, 53, 0.25);
+    --color-down: #1565c0;
+    --color-down-bg: rgba(21, 101, 192, 0.08);
+    --color-down-border: rgba(21, 101, 192, 0.25);
+    --color-neutral: #f59e0b;
+    --color-neutral-bg: rgba(245, 158, 11, 0.08);
 
     /* Borders */
-    --border-color: rgba(48, 54, 61, 0.8);
-    --border-color-light: rgba(48, 54, 61, 0.4);
+    --border-color: rgba(0, 0, 0, 0.1);
+    --border-color-light: rgba(0, 0, 0, 0.06);
 
     /* Shadows */
-    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
-    --shadow-glow-up: 0 0 20px rgba(255, 71, 87, 0.15);
-    --shadow-glow-down: 0 0 20px rgba(9, 132, 227, 0.15);
-    --shadow-glow-accent: 0 0 20px rgba(108, 92, 231, 0.2);
+    --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+    --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.1);
+    --shadow-glow-up: 0 0 20px rgba(229, 57, 53, 0.1);
+    --shadow-glow-down: 0 0 20px rgba(21, 101, 192, 0.1);
+    --shadow-glow-accent: 0 0 20px rgba(108, 92, 231, 0.12);
 
     /* Spacing */
     --sidebar-width: 240px;
@@ -847,11 +847,13 @@ input {
     font-size: 0.78rem;
     color: var(--text-tertiary);
     margin-bottom: 6px;
+    text-align: center;
 }
 
 .stat-value {
     font-size: 1.15rem;
     font-weight: 700;
+    text-align: center;
 }
 
 .detail-chart-section {
@@ -1413,4 +1415,290 @@ input {
 .factor-range {
     width: 100%;
     accent-color: var(--accent-primary);
+}
+
+/* ---- Trading Page ---- */
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.data-table th {
+    text-align: center;
+    padding: 10px 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border-color);
+    white-space: nowrap;
+    font-size: 0.8rem;
+}
+
+.data-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color-light);
+    color: var(--text-primary);
+    white-space: nowrap;
+    text-align: center;
+}
+
+.data-table tbody tr:hover {
+    background: var(--bg-card-hover);
+}
+
+.stat-box {
+    background: var(--bg-tertiary);
+    border-radius: 10px;
+    padding: 12px 18px;
+    min-width: 120px;
+    text-align: center;
+}
+
+.trade-type-btn.active-buy {
+    background: var(--accent-primary) !important;
+    color: #fff !important;
+}
+
+.trade-type-btn.active-sell {
+    background: #ef4444 !important;
+    color: #fff !important;
+}
+
+.badge {
+    display: inline-block;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+/* ---- Scalping Page ---- */
+.config-section {
+    background: var(--bg-tertiary);
+    border-radius: 10px;
+    padding: 16px;
+}
+
+.config-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 0.9rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.config-toggle input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--accent-primary);
+}
+
+.config-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+}
+
+.config-field input,
+.config-field select {
+    font-size: 0.85rem;
+}
+
+.code-chip {
+    transition: background 0.2s;
+}
+
+.code-chip:hover {
+    background: var(--bg-card-hover) !important;
+}
+
+/* ---- Account Panel (Header) ---- */
+.account-panel {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-right: 8px;
+    padding: 4px 8px;
+    border-radius: 10px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.account-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.account-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.account-status-dot.offline { background: #6e7681; }
+.account-status-dot.online { background: #00b894; box-shadow: 0 0 6px rgba(0,184,148,0.5); }
+.account-status-dot.simulation { background: #f59e0b; box-shadow: 0 0 6px rgba(245,158,11,0.5); }
+.account-status-dot.error { background: #ef4444; }
+
+.account-balance-mini {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    padding: 0 6px;
+    border-left: 1px solid var(--border-color);
+}
+
+.account-cash {
+    color: var(--accent-primary-light);
+}
+
+.account-btn {
+    padding: 4px 10px !important;
+    font-size: 0.78rem !important;
+    gap: 4px;
+    display: flex;
+    align-items: center;
+    white-space: nowrap;
+}
+
+.account-btn.logged-in {
+    color: var(--text-secondary);
+    border-color: var(--border-color);
+}
+
+/* Account Dropdown */
+.account-dropdown {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    width: 280px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    z-index: 1000;
+    padding: 0;
+    overflow: hidden;
+}
+
+.account-dropdown-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.account-dropdown-title {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.account-dropdown-mode {
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.account-dropdown-mode.sim {
+    background: rgba(245,158,11,0.15);
+    color: #f59e0b;
+}
+
+.account-dropdown-mode.live {
+    background: rgba(239,68,68,0.15);
+    color: #ef4444;
+}
+
+.account-dropdown-body {
+    padding: 10px 16px;
+}
+
+.account-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    font-size: 0.83rem;
+}
+
+.account-info-row span:first-child {
+    color: var(--text-secondary);
+}
+
+.account-info-row span:last-child {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.account-dropdown-footer {
+    padding: 10px 16px;
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.account-ws-status {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-right: auto;
+}
+
+.account-ws-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #6e7681;
+    display: inline-block;
+}
+.account-ws-dot.connected { background: #00b894; }
+
+.account-dropdown-btn {
+    padding: 4px 10px !important;
+    font-size: 0.75rem !important;
+    border-radius: 6px !important;
+}
+
+.account-logout-btn {
+    background: rgba(239,68,68,0.1) !important;
+    color: #ef4444 !important;
+    border: 1px solid rgba(239,68,68,0.3) !important;
+}
+
+.account-logout-btn:hover {
+    background: rgba(239,68,68,0.2) !important;
+}
+
+@media (max-width: 768px) {
+    .account-panel {
+        padding: 2px 6px;
+        gap: 6px;
+    }
+    .account-balance-mini {
+        display: none !important;
+    }
+    .account-btn span {
+        display: none;
+    }
+    .account-dropdown {
+        right: -20px;
+        width: 260px;
+    }
 }

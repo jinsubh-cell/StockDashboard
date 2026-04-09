@@ -2,9 +2,15 @@ import os
 import requests
 import logging
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from project root (parent of backend/) or current dir
+_env_path = Path(__file__).resolve().parent.parent.parent / '.env'
+if _env_path.exists():
+    load_dotenv(_env_path)
+else:
+    load_dotenv()  # fallback to current directory
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +24,7 @@ class KiwoomAPIProvider:
     def __init__(self):
         self.app_key = os.getenv("KIWOOM_APP_KEY", "")
         self.secret_key = os.getenv("KIWOOM_SECRET_KEY", "")
+        self.account_no = os.getenv("KIWOOM_ACCOUNT_NO", "")
         self.is_simulation = os.getenv("KIWOOM_IS_SIMULATION", "True").lower() == "true"
 
         self.base_url = "https://api.kiwoom.com"
@@ -105,15 +112,19 @@ class KiwoomAPIProvider:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Connection": "close"
             }
+            logger.info(f"Requesting Kiwoom token... (simulation={self.is_simulation})")
             res = requests.post(url, json=payload, headers=headers, timeout=10)
+            logger.info(f"Kiwoom auth response: status={res.status_code}")
 
             # Handle non-JSON responses
             try:
                 data = res.json()
             except ValueError as e:
-                logger.error(f"Kiwoom auth returned non-JSON response: {e}")
+                logger.error(f"Kiwoom auth returned non-JSON response: {e}, body={res.text[:200]}")
                 self._mark_auth_failed("Non-JSON response from auth endpoint")
                 return None
+
+            logger.info(f"Kiwoom auth data: {data}")
 
             if "token" in data or "access_token" in data:
                 token_val = data.get("token") or data.get("access_token")
@@ -154,8 +165,8 @@ class KiwoomAPIProvider:
     def _get_headers(self, tr_id: str, cont_yn: str = 'N', next_key: str = ''):
         if not self.access_token or (self.token_expiry and datetime.now().timestamp() > self.token_expiry):
             self.get_access_token()
-            
-        return {
+
+        headers = {
             "Content-Type": "application/json;charset=UTF-8",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Connection": "close",
@@ -164,8 +175,12 @@ class KiwoomAPIProvider:
             "secretkey": self.secret_key,
             "api-id": tr_id,
             "cont-yn": cont_yn,
-            "next-key": next_key
+            "next-key": next_key,
         }
+        # Include account number header for account-related APIs
+        if self.account_no:
+            headers["acnt-no"] = self.account_no
+        return headers
 
     def get_top_volume_stocks(self):
         """
@@ -196,7 +211,9 @@ class KiwoomAPIProvider:
                 logger.error(f"Kiwoom ka10030 returned non-JSON response (status {res.status_code})")
                 return []
 
-            return data
+            # API returns dict with 'tdy_trde_qty_upper' key containing the list
+            if isinstance(data, dict):
+                return data.get("tdy_trde_qty_upper", [])
 
         except Exception as e:
             logger.error(f"Error fetching top volume from Kiwoom: {e}")
@@ -245,6 +262,321 @@ class KiwoomAPIProvider:
         except Exception as e:
             logger.error(f"Error fetching price from Kiwoom for {code}: {e}")
             return None
+
+
+    # ─── Trading (주문) Methods ───
+
+    def place_order(self, code: str, order_type: str, quantity: int, price: int = 0, price_type: str = "limit"):
+        """
+        주식 매수/매도 주문 (키움 REST API 공식 스펙)
+        매수: kt10000, 매도: kt10001
+        엔드포인트: /api/dostk/ordr
+        trde_tp: 0=지정가, 3=시장가, 5=조건부지정가, 61=장전시간외시장가, 81=시간외단일가 등
+        """
+        if not self.is_auth_available:
+            return {"success": False, "message": "키움 인증이 필요합니다."}
+
+        try:
+            url = f"{self.base_url}/api/dostk/ordr"
+
+            # 거래유형: 0=지정가, 3=시장가
+            if price_type == "market":
+                trde_tp = "3"
+                ord_uv = ""
+            else:
+                trde_tp = "0"
+                ord_uv = str(price)
+
+            payload = {
+                "dmst_stex_tp": "KRX",    # 국내거래소구분 (필수)
+                "stk_cd": code,            # 종목코드 (필수)
+                "ord_qty": str(quantity),   # 주문수량 (필수)
+                "ord_uv": ord_uv,          # 주문단가 (지정가 시)
+                "trde_tp": trde_tp,        # 거래유형 (필수)
+                "cond_uv": "",             # 조건단가
+            }
+
+            # 매수: kt10000, 매도: kt10001
+            tr_id = "kt10000" if order_type == "buy" else "kt10001"
+            res = requests.post(url, headers=self._get_headers(tr_id), json=payload, timeout=10)
+
+            try:
+                data = res.json()
+            except ValueError:
+                return {"success": False, "message": f"키움 주문 응답 파싱 실패 (HTTP {res.status_code})"}
+
+            logger.info(f"Order response ({tr_id}): {data}")
+
+            if data.get("return_code") is not None and int(data.get("return_code", -1)) == 0:
+                return {
+                    "success": True,
+                    "order_no": data.get("ord_no", ""),
+                    "message": f"{'매수' if order_type == 'buy' else '매도'} 주문이 접수되었습니다."
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": data.get("return_msg", str(data))
+                }
+
+        except requests.exceptions.Timeout:
+            return {"success": False, "message": "주문 요청 시간 초과"}
+        except Exception as e:
+            logger.error(f"Order error: {e}")
+            return {"success": False, "message": f"주문 오류: {str(e)}"}
+
+    def modify_order(self, org_order_no: str, code: str, quantity: int, price: int):
+        """
+        주문 정정 (kt10002)
+        엔드포인트: /api/dostk/ordr
+        """
+        if not self.is_auth_available:
+            return {"success": False, "message": "키움 인증이 필요합니다."}
+
+        try:
+            url = f"{self.base_url}/api/dostk/ordr"
+            payload = {
+                "dmst_stex_tp": "KRX",
+                "stk_cd": code,
+                "ord_qty": str(quantity),
+                "ord_uv": str(price),
+                "trde_tp": "0",              # 지정가 정정
+                "org_ord_no": org_order_no,
+                "cond_uv": "",
+            }
+
+            tr_id = "kt10002"
+            res = requests.post(url, headers=self._get_headers(tr_id), json=payload, timeout=10)
+            data = res.json()
+
+            if data.get("return_code") is not None and int(data.get("return_code", -1)) == 0:
+                return {"success": True, "order_no": data.get("ord_no", ""), "message": "주문이 정정되었습니다."}
+            return {"success": False, "message": data.get("return_msg", str(data))}
+
+        except Exception as e:
+            logger.error(f"Modify order error: {e}")
+            return {"success": False, "message": f"정정 오류: {str(e)}"}
+
+    def cancel_order(self, org_order_no: str, code: str, quantity: int):
+        """
+        주문 취소 (kt10003)
+        엔드포인트: /api/dostk/ordr
+        """
+        if not self.is_auth_available:
+            return {"success": False, "message": "키움 인증이 필요합니다."}
+
+        try:
+            url = f"{self.base_url}/api/dostk/ordr"
+            payload = {
+                "dmst_stex_tp": "KRX",
+                "stk_cd": code,
+                "ord_qty": str(quantity),
+                "org_ord_no": org_order_no,
+            }
+
+            tr_id = "kt10003"
+            res = requests.post(url, headers=self._get_headers(tr_id), json=payload, timeout=10)
+            data = res.json()
+
+            if data.get("return_code") is not None and int(data.get("return_code", -1)) == 0:
+                return {"success": True, "order_no": data.get("ord_no", ""), "message": "주문이 취소되었습니다."}
+            return {"success": False, "message": data.get("return_msg", str(data))}
+
+        except Exception as e:
+            logger.error(f"Cancel order error: {e}")
+            return {"success": False, "message": f"취소 오류: {str(e)}"}
+
+    def get_account_balance(self):
+        """
+        계좌평가잔고내역요청 (kt00018) + 계좌별당일현황 (kt00017)
+        kt00018: 보유종목, 총평가금액 등
+        kt00017: 예수금(d2_entra) 조회
+
+        Returns dict on success, or {"_error": "message"} on API error, or None on auth failure.
+        """
+        if not self.is_auth_available:
+            logger.warning("get_account_balance: auth not available")
+            return None
+
+        # Ensure we have a valid token
+        token = self.get_access_token()
+        if not token:
+            logger.warning("get_account_balance: no valid token")
+            return None
+
+        try:
+            # --- kt00018: 계좌평가잔고내역 ---
+            url = f"{self.base_url}/api/dostk/acnt"
+            payload = {
+                "acnt_no": self.account_no,  # 계좌번호 (필수)
+                "qry_tp": "1",           # 조회구분 1:합산, 2:개별
+                "dmst_stex_tp": "KRX",   # 국내거래소구분 KRX:한국거래소, NXT:넥스트트레이드
+            }
+
+            tr_id = "kt00018"
+            logger.info(f"kt00018 request: acnt_no={self.account_no[:4]}****, url={url}")
+            res = requests.post(url, headers=self._get_headers(tr_id), json=payload, timeout=10)
+
+            try:
+                data = res.json()
+            except ValueError:
+                logger.error(f"kt00018 returned non-JSON (status {res.status_code}, body={res.text[:200]})")
+                return None
+
+            logger.info(f"kt00018 response: return_code={data.get('return_code')}, return_msg={data.get('return_msg', '')}")
+
+            # API 에러 체크 - return error message so UI can display it
+            if data.get("return_code") is not None and int(data.get("return_code", 0)) != 0:
+                err_msg = data.get("return_msg", str(data))
+                logger.error(f"kt00018 error: {err_msg}")
+                return {"_error": err_msg}
+
+            # --- kt00017: 예수금 조회 ---
+            cash = 0
+            try:
+                cash_payload = {
+                    "acnt_no": self.account_no,  # 계좌번호 (필수)
+                }
+                res_cash = requests.post(url, headers=self._get_headers("kt00017"), json=cash_payload, timeout=10)
+                cash_data = res_cash.json()
+                logger.info(f"kt00017 response: return_code={cash_data.get('return_code')}, return_msg={cash_data.get('return_msg', '')}")
+                if cash_data.get("return_code") is not None and int(cash_data.get("return_code", 0)) == 0:
+                    # d2_entra: D+2 예수금 (실제 출금/매수 가능 금액)
+                    cash = int(cash_data.get("d2_entra", "0").lstrip("0") or "0")
+                    logger.info(f"kt00017 예수금(d2_entra): {cash}")
+                else:
+                    logger.warning(f"kt00017 failed: {cash_data.get('return_msg', cash_data)}")
+            except Exception as e:
+                logger.warning(f"kt00017 cash query failed: {e}")
+
+            # 보유종목 파싱 - kt00018 실제 응답 필드명 기준
+            holdings = []
+            items = data.get("acnt_evlt_remn_indv_tot", [])
+            if isinstance(items, list):
+                for item in items:
+                    code = item.get("stk_cd", "")
+                    qty = int(item.get("remn_qty", "0").lstrip("0") or "0")  # 잔여수량
+                    if qty <= 0:
+                        continue
+                    avg_price = float(item.get("avg_pur_prc", "0"))  # 평균매입가
+                    cur_price = float(item.get("cur_prc", "0"))      # 현재가
+                    eval_amt = float(item.get("evlt_amt", "0").lstrip("0") or "0")  # 평가금액
+                    pnl = float(item.get("evlt_pl", "0").lstrip("0") or "0")        # 평가손익
+                    pnl_pct = float(item.get("prft_rt", "0"))        # 수익률
+
+                    holdings.append({
+                        "code": code,
+                        "name": item.get("stk_nm", code),
+                        "quantity": qty,
+                        "avg_price": avg_price,
+                        "current_price": cur_price,
+                        "eval_amount": eval_amt,
+                        "pnl": pnl,
+                        "pnl_pct": round(pnl_pct, 2),
+                    })
+
+            # 합계 데이터 - kt00018 실제 응답 필드명 기준
+            total_eval = int(data.get("tot_evlt_amt", "0").lstrip("0") or "0")
+            total_purchase = int(data.get("tot_pur_amt", "0").lstrip("0") or "0")
+            total_pnl = int(data.get("tot_evlt_pl", "0").lstrip("0") or "0")
+            total_pnl_pct = float(data.get("tot_prft_rt", "0"))
+            # prsm_dpst_aset_amt: 추정예탁자산금액 (예수금 포함 총자산)
+            estimated_asset = int(data.get("prsm_dpst_aset_amt", "0").lstrip("0") or "0")
+
+            return {
+                "total_eval": total_eval,
+                "total_purchase": total_purchase,
+                "total_pnl": total_pnl,
+                "total_pnl_pct": total_pnl_pct,
+                "cash": cash,
+                "estimated_asset": estimated_asset,
+                "holdings": holdings,
+            }
+
+        except Exception as e:
+            logger.error(f"Balance query error: {e}")
+            return None
+
+    def get_order_history(self):
+        """
+        미체결 조회 (ka10075) + 체결 조회 (ka10076)
+        엔드포인트: /api/dostk/acnt
+        """
+        if not self.is_auth_available:
+            return []
+
+        orders = []
+        url = f"{self.base_url}/api/dostk/acnt"
+        base_payload = {
+            "acnt_no": self.account_no,  # 계좌번호 (필수)
+            "all_stk_tp": "0",      # 전체종목
+            "trde_tp": "0",         # 전체거래
+            "dmst_stex_tp": "KRX",  # 한국거래소
+            "stex_tp": "KRX",       # 거래소구분
+        }
+
+        try:
+            # 1) 미체결 조회 (ka10075)
+            res = requests.post(url, headers=self._get_headers("ka10075"), json=base_payload, timeout=10)
+            try:
+                data = res.json()
+            except ValueError:
+                data = {}
+
+            if data.get("return_code") is not None and int(data.get("return_code", -1)) == 0:
+                items = data.get("oso", [])
+                for item in items:
+                    ord_qty = int(item.get("ord_qty", "0").lstrip("0") or "0")
+                    filled_qty = int(item.get("ccls_qty", "0").lstrip("0") or "0")
+                    buy_sell = item.get("buy_sell_tp", "")
+                    order_type = "buy" if buy_sell in ("2", "02") else "sell"
+
+                    orders.append({
+                        "order_no": item.get("ord_no", ""),
+                        "code": item.get("stk_cd", ""),
+                        "name": item.get("stk_nm", ""),
+                        "order_type": order_type,
+                        "quantity": ord_qty,
+                        "price": int(item.get("ord_prc", "0").lstrip("0") or "0"),
+                        "filled_quantity": filled_qty,
+                        "filled_price": 0,
+                        "status": "pending",
+                        "order_time": item.get("ord_time", ""),
+                    })
+
+            # 2) 체결 조회 (ka10076)
+            res2 = requests.post(url, headers=self._get_headers("ka10076"), json=base_payload, timeout=10)
+            try:
+                data2 = res2.json()
+            except ValueError:
+                data2 = {}
+
+            if data2.get("return_code") is not None and int(data2.get("return_code", -1)) == 0:
+                items2 = data2.get("oso", data2.get("ccls_list", []))
+                for item in items2:
+                    ord_qty = int(item.get("ord_qty", "0").lstrip("0") or "0")
+                    filled_qty = int(item.get("ccls_qty", "0").lstrip("0") or "0")
+                    buy_sell = item.get("buy_sell_tp", "")
+                    order_type = "buy" if buy_sell in ("2", "02") else "sell"
+
+                    orders.append({
+                        "order_no": item.get("ord_no", ""),
+                        "code": item.get("stk_cd", ""),
+                        "name": item.get("stk_nm", ""),
+                        "order_type": order_type,
+                        "quantity": ord_qty,
+                        "price": int(item.get("ord_prc", "0").lstrip("0") or "0"),
+                        "filled_quantity": filled_qty,
+                        "filled_price": float(item.get("ccls_prc", "0").lstrip("0") or "0"),
+                        "status": "filled" if filled_qty >= ord_qty and ord_qty > 0 else "partial",
+                        "order_time": item.get("ord_time", ""),
+                    })
+
+            return orders
+
+        except Exception as e:
+            logger.error(f"Order history error: {e}")
+            return []
 
 
 kiwoom = KiwoomAPIProvider()

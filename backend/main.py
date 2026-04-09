@@ -4,7 +4,7 @@ FastAPI application with market data, technical analysis, backtesting, and facto
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from routers import market, analysis, backtest, factor, screener
+from routers import market, analysis, backtest, factor, screener, trading, scalping, auto_scalping, journal, analyzer
 import logging
 import asyncio
 from services.kiwoom_ws import kiwoom_ws_manager
@@ -48,6 +48,11 @@ app.include_router(analysis.router)
 app.include_router(backtest.router)
 app.include_router(factor.router)
 app.include_router(screener.router)
+app.include_router(trading.router)
+app.include_router(scalping.router)
+app.include_router(auto_scalping.router)
+app.include_router(journal.router)
+app.include_router(analyzer.router)
 
 async def _warm_cache():
     """Pre-fetch market data on startup so the first user request is instant."""
@@ -100,5 +105,10 @@ async def root():
             "analysis": "/api/analysis",
             "backtest": "/api/backtest",
             "factor": "/api/factor",
+            "trading": "/api/trading",
+            "scalping": "/api/scalping",
+            "auto_scalping": "/api/auto-scalping",
+            "journal": "/api/journal",
+            "analyzer": "/api/analyzer",
         },
     }

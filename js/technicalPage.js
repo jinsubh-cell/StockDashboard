@@ -453,7 +453,7 @@ function renderIndicatorCharts(data, displayDays) {
         ...opts,
         datasets: [
           { label: '상단', data: sl(data.bb_upper), borderColor: 'rgba(255,71,87,0.5)', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: false },
-          { label: '종가', data: visibleCloses, borderColor: '#e6edf3', borderWidth: 2, pointRadius: 0, tension: 0.2 },
+          { label: '종가', data: visibleCloses, borderColor: '#1a1d23', borderWidth: 2, pointRadius: 0, tension: 0.2 },
           { label: '중간', data: sl(data.bb_middle), borderColor: '#ffa502', borderWidth: 1, pointRadius: 0, tension: 0.3, borderDash: [4, 3] },
           { label: '하단', data: sl(data.bb_lower), borderColor: 'rgba(9,132,227,0.5)', borderWidth: 1, pointRadius: 0, tension: 0.3, fill: '-3', backgroundColor: 'rgba(108,92,231,0.05)' },
         ]
@@ -527,11 +527,11 @@ function chartOptions(title) {
     interaction: { intersect: false, mode: 'index' },
     plugins: {
       legend: { display: false },
-      tooltip: { backgroundColor: 'rgba(22,27,34,0.95)', titleColor: '#e6edf3', bodyColor: '#8b949e', borderColor: 'rgba(48,54,61,0.8)', borderWidth: 1, padding: 10, cornerRadius: 6 }
+      tooltip: { backgroundColor: 'rgba(255,255,255,0.97)', titleColor: '#1a1d23', bodyColor: '#5f6876', borderColor: 'rgba(0,0,0,0.1)', borderWidth: 1, padding: 10, cornerRadius: 6 }
     },
     scales: {
-      x: { grid: { color: 'rgba(48,54,61,0.3)' }, ticks: { color: '#6e7681', font: { size: 10 }, maxRotation: 0, maxTicksLimit: 12 } },
-      y: { grid: { color: 'rgba(48,54,61,0.3)' }, ticks: { color: '#6e7681', font: { size: 10 }, callback: v => v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v } }
+      x: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#8b95a5', font: { size: 10 }, maxRotation: 0, maxTicksLimit: 12 } },
+      y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: '#8b95a5', font: { size: 10 }, callback: v => v >= 1000 ? (v / 1000).toFixed(0) + 'K' : v } }
     }
   };
 }

@@ -130,3 +130,65 @@ class FactorRanking(BaseModel):
     factors_used: list[str]
     weights: dict[str, float]
     rankings: list[FactorScore]
+
+
+# ─── Trading (주문) ───
+
+class OrderRequest(BaseModel):
+    code: str                          # 종목코드
+    order_type: str                    # "buy" | "sell"
+    quantity: int                      # 주문수량
+    price: int = 0                     # 주문가격 (0이면 시장가)
+    price_type: str = "limit"          # "limit"(지정가) | "market"(시장가)
+
+
+class OrderModifyRequest(BaseModel):
+    org_order_no: str                  # 원주문번호
+    code: str                          # 종목코드
+    quantity: int                      # 정정수량
+    price: int                         # 정정가격
+
+
+class OrderCancelRequest(BaseModel):
+    org_order_no: str                  # 원주문번호
+    code: str                          # 종목코드
+    quantity: int                      # 취소수량
+
+
+class OrderResponse(BaseModel):
+    success: bool
+    order_no: Optional[str] = None
+    message: str
+
+
+class BalanceItem(BaseModel):
+    code: str
+    name: str
+    quantity: int                      # 보유수량
+    avg_price: float                   # 평균매입가
+    current_price: float               # 현재가
+    eval_amount: float                 # 평가금액
+    pnl: float                         # 손익금액
+    pnl_pct: float                     # 손익률(%)
+
+
+class AccountBalance(BaseModel):
+    total_eval: float                  # 총평가금액
+    total_purchase: float              # 총매입금액
+    total_pnl: float                   # 총손익
+    total_pnl_pct: float               # 총손익률
+    cash: float                        # 예수금
+    holdings: list[BalanceItem]
+
+
+class OrderHistoryItem(BaseModel):
+    order_no: str
+    code: str
+    name: str
+    order_type: str                    # "buy" | "sell"
+    quantity: int
+    price: int
+    filled_quantity: int               # 체결수량
+    filled_price: float                # 체결가격
+    status: str                        # "filled" | "pending" | "cancelled" | "partial"
+    order_time: str
