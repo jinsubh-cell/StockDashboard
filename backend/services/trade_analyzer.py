@@ -60,6 +60,9 @@ class TradeBrain:
     @property
     def client(self):
         if self._client is None:
+            # .env를 매번 다시 로드 (키 변경 대응)
+            if _env_path.exists():
+                load_dotenv(_env_path, override=True)
             api_key = os.getenv("ANTHROPIC_API_KEY", "")
             if api_key:
                 try:
@@ -71,6 +74,10 @@ class TradeBrain:
             else:
                 logger.warning("[Brain] ANTHROPIC_API_KEY 미설정")
         return self._client
+
+    def _reset_client(self):
+        """API 키 변경 시 클라이언트 리셋"""
+        self._client = None
 
     @property
     def ai_available(self) -> bool:
@@ -289,7 +296,7 @@ class TradeBrain:
             prompt = self._build_evolution_prompt(current_config, is_deep)
 
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-20250514",
                 max_tokens=3000,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -302,6 +309,7 @@ class TradeBrain:
 
         except Exception as e:
             logger.error(f"[Brain] Claude API 호출 실패: {e}")
+            self._reset_client()  # 다음 시도 시 키 재로드
             # 실패 시 규칙 기반으로 폴백
             return self._rule_based_evolve()
 

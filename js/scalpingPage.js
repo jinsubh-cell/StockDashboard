@@ -10,9 +10,32 @@ import {
     getAutoScalpingStatus, startAutoScalping, stopAutoScalping,
     getAutoScalpingConfig, updateAutoScalpingConfig, forceAutoScan,
 } from './quantApi.js';
-import { formatPrice } from './data.js';
+import { formatPrice, getStockByCode } from './data.js';
 
 let _pollTimer = null;
+
+// 종목코드 → 종목명 헬퍼
+function stockLabel(code, scores) {
+    // Auto 모드: stock_scores에서 이름 가져옴
+    if (scores && scores[code] && scores[code].name) {
+        return `${scores[code].name}<br><span style="color:var(--text-secondary);font-size:0.75rem;">${code}</span>`;
+    }
+    // Manual 모드: data.js의 종목 목록에서 조회
+    const stock = getStockByCode(code);
+    if (stock && stock.name) {
+        return `${stock.name}<br><span style="color:var(--text-secondary);font-size:0.75rem;">${code}</span>`;
+    }
+    return code;
+}
+
+function stockLabelInline(code, scores) {
+    if (scores && scores[code] && scores[code].name) {
+        return `${scores[code].name}(${code})`;
+    }
+    const stock = getStockByCode(code);
+    if (stock && stock.name) return `${stock.name}(${code})`;
+    return code;
+}
 let _selectedCodes = [];
 let _autoMode = false;  // false = 수동, true = 자동
 
@@ -619,16 +642,16 @@ async function pollStatus() {
             const color = p.pnl >= 0 ? 'var(--accent-primary)' : '#ef4444';
             const sideColor = p.side === 'buy' ? 'var(--accent-primary)' : '#ef4444';
             return `<tr>
-                <td>${p.code}</td>
+                <td>${stockLabel(p.code)}</td>
                 <td style="color:${sideColor}; font-weight:600;">${p.side === 'buy' ? '매수' : '매도'}</td>
-                <td style="text-align:right;">${formatPrice(p.entry_price)}</td>
-                <td style="text-align:right;">${formatPrice(p.current_price)}</td>
-                <td style="text-align:right;">${p.quantity}</td>
-                <td style="text-align:right; color:${color};">${p.pnl >= 0 ? '+' : ''}${formatPrice(p.pnl)}</td>
-                <td style="text-align:right; color:${color};">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}%</td>
-                <td style="text-align:right;">${p.hold_seconds}초</td>
-                <td style="text-align:right; color:#ef4444;">${formatPrice(p.stop_loss)}</td>
-                <td style="text-align:right; color:#00b894;">${formatPrice(p.take_profit)}</td>
+                <td style="text-align:center;">${formatPrice(p.entry_price)}</td>
+                <td style="text-align:center;">${formatPrice(p.current_price)}</td>
+                <td style="text-align:center;">${p.quantity}</td>
+                <td style="text-align:center; color:${color};">${p.pnl >= 0 ? '+' : ''}${formatPrice(p.pnl)}</td>
+                <td style="text-align:center; color:${color};">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}%</td>
+                <td style="text-align:center;">${p.hold_seconds}초</td>
+                <td style="text-align:center; color:#ef4444;">${formatPrice(p.stop_loss)}</td>
+                <td style="text-align:center; color:#00b894;">${formatPrice(p.take_profit)}</td>
             </tr>`;
         }).join('');
     }
@@ -638,12 +661,12 @@ async function pollStatus() {
     if (signals.length === 0) {
         document.getElementById('scalp-signals-body').innerHTML = '<tr><td colspan="6" style="text-align:center; padding:16px; color:var(--text-secondary);">시그널 대기 중</td></tr>';
     } else {
-        document.getElementById('scalp-signals-body').innerHTML = signals.slice().reverse().map(s => {
+        document.getElementById('scalp-signals-body').innerHTML = signals.slice().map(s => {
             const sideColor = s.side === 'buy' ? 'var(--accent-primary)' : '#ef4444';
             const strengthBg = s.strength === 'strong' ? 'rgba(0,184,148,0.2)' : s.strength === 'normal' ? 'rgba(108,92,231,0.15)' : 'transparent';
             return `<tr style="background:${strengthBg}">
                 <td>${s.time}</td>
-                <td>${s.code}</td>
+                <td>${stockLabel(s.code)}</td>
                 <td style="color:${sideColor}; font-weight:600;">${s.side === 'buy' ? '매수' : '매도'}</td>
                 <td>${strategyLabel(s.strategy)}</td>
                 <td>${strengthLabel(s.strength)}</td>
@@ -657,17 +680,17 @@ async function pollStatus() {
     if (trades.length === 0) {
         document.getElementById('scalp-trades-body').innerHTML = '<tr><td colspan="8" style="text-align:center; padding:16px; color:var(--text-secondary);">매매 내역 없음</td></tr>';
     } else {
-        document.getElementById('scalp-trades-body').innerHTML = trades.slice().reverse().map(t => {
+        document.getElementById('scalp-trades-body').innerHTML = trades.slice().map(t => {
             const color = t.pnl >= 0 ? 'var(--accent-primary)' : '#ef4444';
             const sideColor = t.side === 'buy' ? 'var(--accent-primary)' : '#ef4444';
             return `<tr>
                 <td>${t.exit_time}</td>
-                <td>${t.code}</td>
+                <td>${stockLabel(t.code)}</td>
                 <td style="color:${sideColor}; font-weight:600;">${t.side === 'buy' ? '매수' : '매도'}</td>
-                <td style="text-align:right;">${formatPrice(t.entry_price)}</td>
-                <td style="text-align:right;">${formatPrice(t.exit_price)}</td>
-                <td style="text-align:right;">${t.quantity}</td>
-                <td style="text-align:right; color:${color};">${t.pnl >= 0 ? '+' : ''}${formatPrice(t.pnl)}</td>
+                <td style="text-align:center;">${formatPrice(t.entry_price)}</td>
+                <td style="text-align:center;">${formatPrice(t.exit_price)}</td>
+                <td style="text-align:center;">${t.quantity}</td>
+                <td style="text-align:center; color:${color};">${t.pnl >= 0 ? '+' : ''}${formatPrice(t.pnl)}</td>
                 <td>${t.hold_seconds}초</td>
             </tr>`;
         }).join('');
@@ -721,10 +744,10 @@ async function pollAutoStatus() {
     if (signals.length === 0) {
         signalEl.innerHTML = '<span style="color:var(--text-secondary);">시그널 대기 중...</span>';
     } else {
-        signalEl.innerHTML = signals.slice().reverse().map(s => {
+        signalEl.innerHTML = signals.slice().map(s => {
             const color = s.side === 'buy' ? '#00b894' : '#ef4444';
             const actionColor = s.action === 'ENTRY' ? '#ff7675' : '#636e72';
-            return `<div style="margin-bottom:2px;"><span style="color:var(--text-secondary);">${s.time}</span> <span style="color:${color}; font-weight:700;">${s.side === 'buy' ? 'BUY' : 'SELL'}</span> ${s.code} <span style="color:#6c5ce7;">${s.strategy}</span> <span style="color:${actionColor}; font-weight:600;">[${s.action}]</span> <span style="color:var(--text-secondary);">${s.reason || ''}</span></div>`;
+            return `<div style="margin-bottom:2px;"><span style="color:var(--text-secondary);">${s.time}</span> <span style="color:${color}; font-weight:700;">${s.side === 'buy' ? 'BUY' : 'SELL'}</span> ${stockLabelInline(s.code, scores)} <span style="color:#6c5ce7;">${s.strategy}</span> <span style="color:${actionColor}; font-weight:600;">[${s.action}]</span> <span style="color:var(--text-secondary);">${s.reason || ''}</span></div>`;
         }).join('');
     }
 
@@ -752,16 +775,16 @@ async function pollAutoStatus() {
             const color = p.pnl >= 0 ? 'var(--accent-primary)' : '#ef4444';
             const sideColor = p.side === 'buy' ? 'var(--accent-primary)' : '#ef4444';
             return `<tr>
-                <td>${p.code}</td>
+                <td>${stockLabel(p.code, scores)}</td>
                 <td style="color:${sideColor}; font-weight:600;">${p.side === 'buy' ? '매수' : '매도'}</td>
-                <td style="text-align:right;">${formatPrice(p.entry_price)}</td>
-                <td style="text-align:right;">${formatPrice(p.current_price)}</td>
-                <td style="text-align:right;">${p.quantity}</td>
-                <td style="text-align:right; color:${color};">${p.pnl >= 0 ? '+' : ''}${formatPrice(p.pnl)}</td>
-                <td style="text-align:right; color:${color};">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}%</td>
-                <td style="text-align:right;">${p.hold_seconds}초</td>
-                <td style="text-align:right; color:#ef4444;">${formatPrice(p.stop_loss)}</td>
-                <td style="text-align:right; color:#00b894;">${formatPrice(p.take_profit)}</td>
+                <td style="text-align:center;">${formatPrice(p.entry_price)}</td>
+                <td style="text-align:center;">${formatPrice(p.current_price)}</td>
+                <td style="text-align:center;">${p.quantity}</td>
+                <td style="text-align:center; color:${color};">${p.pnl >= 0 ? '+' : ''}${formatPrice(p.pnl)}</td>
+                <td style="text-align:center; color:${color};">${p.pnl_pct >= 0 ? '+' : ''}${p.pnl_pct}%</td>
+                <td style="text-align:center;">${p.hold_seconds}초</td>
+                <td style="text-align:center; color:#ef4444;">${formatPrice(p.stop_loss)}</td>
+                <td style="text-align:center; color:#00b894;">${formatPrice(p.take_profit)}</td>
             </tr>`;
         }).join('');
     }
@@ -771,17 +794,17 @@ async function pollAutoStatus() {
     if (trades.length === 0) {
         document.getElementById('scalp-trades-body').innerHTML = '<tr><td colspan="8" style="text-align:center; padding:16px; color:var(--text-secondary);">매매 내역 없음</td></tr>';
     } else {
-        document.getElementById('scalp-trades-body').innerHTML = trades.slice().reverse().map(t => {
+        document.getElementById('scalp-trades-body').innerHTML = trades.slice().map(t => {
             const color = t.net_pnl >= 0 ? 'var(--accent-primary)' : '#ef4444';
             const sideColor = t.side === 'buy' ? 'var(--accent-primary)' : '#ef4444';
             return `<tr>
                 <td>${t.time}</td>
-                <td>${t.code}</td>
+                <td>${stockLabel(t.code, scores)}</td>
                 <td style="color:${sideColor}; font-weight:600;">${t.side === 'buy' ? '매수' : '매도'}</td>
-                <td style="text-align:right;">${formatPrice(t.entry)}</td>
-                <td style="text-align:right;">${formatPrice(t.exit)}</td>
-                <td style="text-align:right;">${t.qty}</td>
-                <td style="text-align:right; color:${color};">${t.net_pnl >= 0 ? '+' : ''}${formatPrice(t.net_pnl)}원 (수수료 ${formatPrice(t.commission)})</td>
+                <td style="text-align:center;">${formatPrice(t.entry)}</td>
+                <td style="text-align:center;">${formatPrice(t.exit)}</td>
+                <td style="text-align:center;">${t.qty}</td>
+                <td style="text-align:center; color:${color};">${t.net_pnl >= 0 ? '+' : ''}${formatPrice(t.net_pnl)}원 (수수료 ${formatPrice(t.commission)})</td>
                 <td>${t.hold_sec}초</td>
             </tr>`;
         }).join('');
@@ -837,13 +860,13 @@ async function runPickerScan() {
             <td><span style="display:inline-block; width:28px; height:28px; line-height:28px; text-align:center; border-radius:50%; background:${gradeColor}; color:#fff; font-weight:800; font-size:0.85rem;">${c.grade}</span></td>
             <td><a href="#/stock/${c.code}" style="color:var(--accent-primary);">${c.code}</a></td>
             <td style="font-weight:600;">${c.name}</td>
-            <td style="text-align:right;">${formatPrice(c.price)}</td>
-            <td style="text-align:right; color:${changeColor};">${c.change_pct >= 0 ? '+' : ''}${c.change_pct}%</td>
-            <td style="text-align:right;">${formatVolume(c.volume)}</td>
-            <td style="text-align:right; font-weight:600; color:${c.volume_ratio >= 1.5 ? '#00b894' : 'var(--text-primary)'};">${c.volume_ratio}x</td>
-            <td style="text-align:right;">${c.volatility_pct}%</td>
-            <td style="text-align:right;">${c.spread_pct}%</td>
-            <td style="text-align:right;"><span style="font-weight:700; font-size:1rem; color:${gradeColor};">${(c.total_score * 100).toFixed(0)}</span></td>
+            <td style="text-align:center;">${formatPrice(c.price)}</td>
+            <td style="text-align:center; color:${changeColor};">${c.change_pct >= 0 ? '+' : ''}${c.change_pct}%</td>
+            <td style="text-align:center;">${formatVolume(c.volume)}</td>
+            <td style="text-align:center; font-weight:600; color:${c.volume_ratio >= 1.5 ? '#00b894' : 'var(--text-primary)'};">${c.volume_ratio}x</td>
+            <td style="text-align:center;">${c.volatility_pct}%</td>
+            <td style="text-align:center;">${c.spread_pct}%</td>
+            <td style="text-align:center;"><span style="font-weight:700; font-size:1rem; color:${gradeColor};">${(c.total_score * 100).toFixed(0)}</span></td>
             ${renderScoreBar(scores.volume)}
             ${renderScoreBar(scores.volatility)}
             ${renderScoreBar(scores.spread)}

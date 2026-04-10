@@ -69,9 +69,16 @@ class AIAdvisor:
 
         logger.info(f"[AIAdvisor] 초기화 | API 사용 가능: {self.available}")
 
+    def _reset_client(self):
+        """API 키 변경 시 클라이언트 리셋"""
+        self._client = None
+
     @property
     def client(self):
         if self._client is None:
+            # .env를 매번 다시 로드 (키 변경 대응)
+            if _env_path.exists():
+                load_dotenv(_env_path, override=True)
             api_key = os.getenv("ANTHROPIC_API_KEY", "")
             if api_key:
                 try:
@@ -140,7 +147,7 @@ class AIAdvisor:
 - aggressive 모드면 거래량 많고 추세 강한 종목 우선
 """
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-20250514",
                 max_tokens=500,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -197,7 +204,25 @@ class AIAdvisor:
             strategy_perf = brain_data.get("strategy_scores", {}).get(
                 consensus.get("strategy", ""), {})
 
-            prompt = f"""당신은 초단타 스캘핑 진입 판단 AI입니다.
+            # 호가 정보 구성 (0이면 미제공으로 표시)
+            price = tick_data.get('price', 0)
+            bid = tick_data.get('bid', 0)
+            ask = tick_data.get('ask', 0)
+            if bid > 0 and ask > 0:
+                orderbook_info = f"- 매수호가: {bid:,}원 (잔량 {tick_data.get('bid_qty', 0):,})\n- 매도호가: {ask:,}원 (잔량 {tick_data.get('ask_qty', 0):,})"
+            else:
+                orderbook_info = "- 호가 데이터: 실시간 체결가 기반 (호가창 미제공 - 정상)"
+
+            win_rate = round(strategy_perf.get('wins', 0) / max(strategy_perf.get('trade_count', 1), 1) * 100, 1)
+            recent_pnl = sum(strategy_perf.get('recent_pnls', [])[-10:])
+
+            prompt = f"""당신은 초단타 스캘핑 진입 판단 AI입니다. 적극적으로 매매 기회를 잡아야 합니다.
+
+## 핵심 원칙
+- 스캘핑은 다수의 소액 거래로 수익을 쌓는 전략입니다
+- 거래 횟수가 적으면 수익을 낼 수 없습니다
+- 2개 이상 전략이 합의한 시그널은 신뢰도가 높습니다 → 가급적 승인하세요
+- 거부는 명확한 위험(승률 극히 낮음, 연속 대손실)이 있을 때만 합니다
 
 ## 진입 시그널
 - 종목: {code}
@@ -206,44 +231,39 @@ class AIAdvisor:
 - 사유: {consensus.get('reason', '')}
 
 ## 현재 틱 데이터
-- 현재가: {tick_data.get('price', 0):,}원
-- 매수호가: {tick_data.get('bid', 0):,} (잔량 {tick_data.get('bid_qty', 0):,})
-- 매도호가: {tick_data.get('ask', 0):,} (잔량 {tick_data.get('ask_qty', 0):,})
+- 현재가: {price:,}원
+{orderbook_info}
 
 ## 이 전략의 과거 성과
 - 거래수: {strategy_perf.get('trade_count', 0)}
-- 승률: {round(strategy_perf.get('wins', 0) / max(strategy_perf.get('trade_count', 1), 1) * 100, 1)}%
-- 최근10건 손익합: {sum(strategy_perf.get('recent_pnls', [])[-10:]):+,.0f}원
+- 승률: {win_rate}%
+- 최근10건 손익합: {recent_pnl:+,.0f}원
 
 ## 현재 보유 포지션: {len(current_positions)}개
-## 시장 모드: {self.market_mode}
 
 ## 안전 규칙 (절대 위반 불가)
-- 미수거래 불가
-- 신용거래 불가
-- 계좌 잔고 이내에서만 거래
+- 미수거래 불가, 신용거래 불가, 계좌 잔고 이내에서만 거래
 
 반드시 아래 JSON만 답하세요:
 ```json
 {{
   "approve": true 또는 false,
   "adjust": {{
-    "take_profit_pct": 숫자 (선택, 이 거래에만 적용할 익절률),
-    "stop_loss_pct": 숫자 (선택, 이 거래에만 적용할 손절률),
-    "max_hold_seconds": 숫자 (선택)
+    "take_profit_pct": 숫자 (0.3~1.0, 스캘핑에 맞게),
+    "stop_loss_pct": 숫자 (0.2~0.5),
+    "max_hold_seconds": 숫자 (60~300)
   }},
-  "reason": "판단 이유"
+  "reason": "판단 이유 (간결하게)"
 }}
 ```
 
 판단 기준:
-- 전략 과거 성��가 나쁘면 거부
-- defensive 모드면 기준을 엄격하게
-- 호가 스프레드가 넓으면 거부
-- 승인 시 상황에 따라 익절/손절 조정 가능 (수익 끌고갈 수 있으면 익절률 높임)
+- 승률 20% 미만이고 최근 10건 전부 손실이면 거부
+- 그 외에는 적극 승인 (스캘핑은 횟수가 중요)
+- 승인 시 익절/손절을 상황에 맞게 조정 (스캘핑 적정: 익절 0.3~0.8%, 손절 0.2~0.4%)
 """
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-20250514",
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -338,7 +358,7 @@ class AIAdvisor:
 - 수익이 충분하면 → 트레일링 스탑 좁���서 수익 보전하며 홀딩
 """
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-20250514",
                 max_tokens=300,
                 messages=[{"role": "user", "content": prompt}],
             )
@@ -397,6 +417,11 @@ class AIAdvisor:
 
             prompt = f"""당신은 초단타 스캘핑 시장 분석 AI입니다.
 
+## 핵심 원칙
+- 스캘핑은 거래 횟수가 수익의 핵심입니다
+- defensive 모드는 하루 손실이 -30,000원 이상일 때만 사용합니다
+- 평소에는 aggressive 또는 normal을 유지하세요
+
 ## 현재 상태
 - 시각: {datetime.now().strftime('%H:%M')}
 - 보유 포지션: {len(positions)}개
@@ -404,31 +429,26 @@ class AIAdvisor:
 - 오늘 순손익: {stats.get('total_net_pnl', 0):+,.0f}원
 - 승: {stats.get('wins', 0)} / 패: {stats.get('losses', 0)}
 
-## 최근 거래 손익 추이 (최근 순)
+## 최근 거래 손익 추이
 {recent_pnls[-20:] if recent_pnls else '데이터 없음'}
 
-## 안전 규칙 (절대 위반 불가)
-- 미수거래 불가, 신용거래 불가
-- 계좌 잔고 이내에서만
-
-현재 시장 상황을 판단하세요. 반드시 아래 JSON만 답하세요:
+반드시 아래 JSON만 답하세요:
 ```json
 {{
   "mode": "aggressive" 또는 "normal" 또는 "defensive",
-  "reason": "판단 이유",
+  "reason": "판단 이유 (간결하게)",
   "config_adjust": {{}}
 }}
 ```
 
 판단 기준:
-- 연속 수익 + 승률 높음 → aggressive (투자금/포지션 확대)
-- 보통 → normal (현행 유지)
-- 연속 손��� + 오늘 손실 누적 → defensive (투자금 축소, 컨센서스 상향)
-- aggressive에서도 max_investment_per_trade는 2,000,000원을 절대 초과 금지
-- defensive에서 min은 100,000원
+- 거래 횟수가 적으면(10건 미만) → aggressive (거래 활성화 필요)
+- 오늘 손실 -30,000원 이상 → defensive
+- 그 외 → aggressive 또는 normal
+- aggressive에서도 max_investment_per_trade는 2,000,000원 절대 초과 금지
 """
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-opus-4-20250514",
                 max_tokens=400,
                 messages=[{"role": "user", "content": prompt}],
             )

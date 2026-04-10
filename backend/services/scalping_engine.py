@@ -14,16 +14,22 @@ Risk Management:
 - Max concurrent positions
 """
 import asyncio
+import json
 import logging
 import time
 from datetime import datetime, timedelta
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# 설정 파일 경로
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "trading_journals"
+_SCALP_CONFIG_FILE = _CONFIG_DIR / "scalp_config.json"
 
 # 매매일지 & AI 두뇌
 from services.trade_journal import trade_journal
@@ -171,6 +177,31 @@ class ScalpConfig:
                 expected_type = type(getattr(config, k))
                 setattr(config, k, expected_type(v))
         return config
+
+    def save_to_file(self):
+        """설정을 JSON 파일로 저장"""
+        try:
+            _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            _SCALP_CONFIG_FILE.write_text(
+                json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            logger.info(f"[ScalpConfig] 설정 저장 완료: {_SCALP_CONFIG_FILE}")
+        except Exception as e:
+            logger.error(f"[ScalpConfig] 설정 저장 실패: {e}")
+
+    @classmethod
+    def load_from_file(cls):
+        """저장된 설정 파일에서 로드, 없으면 기본값"""
+        if _SCALP_CONFIG_FILE.exists():
+            try:
+                d = json.loads(_SCALP_CONFIG_FILE.read_text(encoding="utf-8"))
+                config = cls.from_dict(d)
+                logger.info(f"[ScalpConfig] 저장된 설정 로드 완료")
+                return config
+            except Exception as e:
+                logger.error(f"[ScalpConfig] 설정 로드 실패, 기본값 사용: {e}")
+        return cls()
 
 
 # ─── Tick Buffer (per-stock ring buffer) ───
@@ -751,7 +782,7 @@ class RiskManager:
 
 class ScalpingEngine:
     def __init__(self):
-        self.config = ScalpConfig()
+        self.config = ScalpConfig.load_from_file()
         self.risk = RiskManager(self.config)
         self.running = False
         self.target_codes: list[str] = []
@@ -784,7 +815,9 @@ class ScalpingEngine:
     def update_config(self, new_config: dict):
         self.config = ScalpConfig.from_dict(new_config)
         self.risk.config = self.config
-        logger.info(f"Scalping config updated: {new_config}")
+        # 파일에 저장 (서버 재시작 시 유지)
+        self.config.save_to_file()
+        logger.info(f"Scalping config updated + saved: {new_config}")
 
     def get_or_create_buffer(self, code: str) -> TickBuffer:
         if code not in self.tick_buffers:

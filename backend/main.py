@@ -92,7 +92,7 @@ async def shutdown_event():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "ai_model": "claude-opus-4-20250514"}
 
 @app.get("/")
 async def root():

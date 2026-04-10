@@ -17,6 +17,7 @@ Cycle:
        └────────────── [성과 평가 → 종목 교체] ←─────────────────────────────┘
 """
 import asyncio
+import json
 import logging
 import time
 import numpy as np
@@ -24,9 +25,14 @@ from datetime import datetime, time as dtime
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
+
+# 설정 파일 경로
+_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "trading_journals"
+_AUTO_CONFIG_FILE = _CONFIG_DIR / "auto_scalp_config.json"
 
 # 매매일지 & AI 두뇌 & AI 어드바이저
 from services.trade_journal import trade_journal
@@ -149,7 +155,7 @@ class TradeResult:
 @dataclass
 class AutoScalpConfig:
     # ── 종목 검색 설정 ──
-    scan_interval_seconds: float = 180    # 3분마다 종목 재검색
+    scan_interval_seconds: float = 60     # 1분마다 종목 재검색
     max_target_stocks: int = 5            # 동시 감시 종목 수
     min_volume: int = 300_000             # 최소 거래량 30만주
     min_price: int = 5_000                # 최소 가격 5천원 (저가주는 호가단위 대비 수수료 비율 높음)
@@ -217,6 +223,32 @@ class AutoScalpConfig:
                     setattr(config, k, expected_type(v))
                 except (ValueError, TypeError):
                     pass
+        return config
+
+    def save_to_file(self):
+        """설정을 JSON 파일로 저장"""
+        try:
+            _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            _AUTO_CONFIG_FILE.write_text(
+                json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            logger.info(f"[AutoScalpConfig] 설정 저장 완료: {_AUTO_CONFIG_FILE}")
+        except Exception as e:
+            logger.error(f"[AutoScalpConfig] 설정 저장 실패: {e}")
+
+    @classmethod
+    def load_from_file(cls):
+        """저장된 설정 파일에서 로드, 없으면 기본값"""
+        if _AUTO_CONFIG_FILE.exists():
+            try:
+                d = json.loads(_AUTO_CONFIG_FILE.read_text(encoding="utf-8"))
+                config = cls.from_dict(d)
+                logger.info(f"[AutoScalpConfig] 저장된 설정 로드 완료")
+                return config
+            except Exception as e:
+                logger.error(f"[AutoScalpConfig] 설정 로드 실패, 기본값 사용: {e}")
+        return cls()
         return config
 
 
@@ -749,7 +781,7 @@ class AutoScalpingSystem:
     """
 
     def __init__(self, config: AutoScalpConfig = None):
-        self.config = config or AutoScalpConfig()
+        self.config = config or AutoScalpConfig.load_from_file()
         self.strategy = StrategyEngine(self.config)
         self.risk = RiskManager(self.config)
         self.scanner = StockScanner(self.config)
@@ -778,6 +810,7 @@ class AutoScalpingSystem:
         # Tasks
         self._monitor_task = None
         self._rotation_task = None
+        self._rescan_task = None
 
     # ── Lifecycle ──
 
@@ -798,6 +831,7 @@ class AutoScalpingSystem:
         # 백그라운드 루프 시작
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         self._rotation_task = asyncio.create_task(self._rotation_loop())
+        self._rescan_task = asyncio.create_task(self._periodic_rescan_loop())
 
         self.state = EngineState.TRADING
         logger.info(f"AutoScalper 시작: 감시 종목 {self.scanner.current_targets}")
@@ -816,7 +850,7 @@ class AutoScalpingSystem:
                 self._close_position(code, buf.latest.price, "엔진 중지")
 
         # 백그라운드 태스크 취소
-        for task in [self._monitor_task, self._rotation_task]:
+        for task in [self._monitor_task, self._rotation_task, self._rescan_task]:
             if task and not task.done():
                 task.cancel()
 
@@ -1136,7 +1170,8 @@ class AutoScalpingSystem:
             await asyncio.sleep(0.3)
 
     async def _rotation_loop(self):
-        """종목 로테이션 루프"""
+        """종목 로테이션 루프 - 주기적 재검색 + 성과 기반 교체"""
+        scan_count = 0
         while self.running:
             await asyncio.sleep(self.config.rotation_interval_seconds)
 
@@ -1144,15 +1179,18 @@ class AutoScalpingSystem:
                 if not self.running:
                     break
 
-                # 종목 재검색 필요?
-                if self.scanner.needs_scan():
-                    await self._do_scan()
-                    continue
+                scan_count += 1
 
-                # 성과 기반 교체
+                # 1. 주기적 강제 재검색 (매 scan_interval마다, 최소 rotation_interval 간격)
+                if self.scanner.needs_scan():
+                    logger.info(f"[Rotation] 주기적 종목 재검색 (#{scan_count})")
+                    await self._do_scan()
+
+                # 2. 성과 기반 교체 (거래가 있는 종목만 평가)
+                rotated = False
                 for code in list(self.scanner.current_targets):
                     if self.scanner.should_rotate(code, self.trade_history):
-                        logger.info(f"종목 교체: {code} (성과 부진)")
+                        logger.info(f"[Rotation] 종목 교체: {code} (성과 부진)")
                         # 포지션이 있으면 먼저 청산
                         if code in self.positions:
                             buf = self.tick_buffers.get(code)
@@ -1160,7 +1198,17 @@ class AutoScalpingSystem:
                                 self._close_position(code, buf.latest.price, "종목 교체")
                         # 재검색
                         await self._do_scan()
+                        rotated = True
                         break
+
+                # 3. 장기 무거래 시 강제 재검색 (3회 로테이션(=30분) 동안 매매 0건)
+                if not rotated and scan_count % 3 == 0:
+                    recent_trades = [t for t in self.trade_history
+                                     if (datetime.now() - datetime.strptime(
+                                         t.entry_time, "%H:%M:%S")).seconds < 1800]
+                    if len(recent_trades) == 0 and len(self.positions) == 0:
+                        logger.info(f"[Rotation] 30분 무거래 → 강제 종목 재검색")
+                        await self._do_scan()
 
             except Exception as e:
                 logger.error(f"Rotation loop error: {e}")
@@ -1192,10 +1240,25 @@ class AutoScalpingSystem:
 
         self.state = EngineState.TRADING
 
+    async def _periodic_rescan_loop(self):
+        """scan_interval_seconds 마다 종목을 재검색하여 최신 거래량 상위 종목으로 갱신"""
+        while self.running:
+            await asyncio.sleep(self.config.scan_interval_seconds)
+            try:
+                if not self.running:
+                    break
+                # 포지션이 열려있으면 재검색 스킵 (진행 중인 거래 보호)
+                if self.positions:
+                    continue
+                logger.info(f"[Rescan] 주기적 종목 재검색 ({self.config.scan_interval_seconds}초 간격)")
+                await self._do_scan()
+            except Exception as e:
+                logger.error(f"[Rescan] 재검색 에러: {e}")
+
     # ── Status & Config ──
 
     def update_config(self, new_config: dict):
-        """설정 업데이트"""
+        """설정 업데이트 + 파일 저장"""
         for k, v in new_config.items():
             if hasattr(self.config, k):
                 expected_type = type(getattr(self.config, k))
@@ -1206,7 +1269,9 @@ class AutoScalpingSystem:
         # 전략 엔진 갱신
         self.strategy = StrategyEngine(self.config)
         self.risk.config = self.config
-        logger.info(f"설정 업데이트 완료")
+        # 파일에 저장 (서버 재시작 시 유지)
+        self.config.save_to_file()
+        logger.info(f"설정 업데이트 + 저장 완료")
 
     def get_status(self) -> dict:
         """현재 상태 반환"""
