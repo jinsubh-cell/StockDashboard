@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 _CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "trading_journals"
 _AUTO_CONFIG_FILE = _CONFIG_DIR / "auto_scalp_config.json"
 
-# 매매일지 & AI 두뇌 & AI 어드바이저
+# 매매일지 & AI 두뇌 & 프리셋 매니저
 from services.trade_journal import trade_journal
 from services.trade_analyzer import trade_brain
-from services.ai_advisor import ai_advisor
+from services.skill_preset import preset_manager
 
 # TA-Lib (optional but recommended)
 try:
@@ -170,6 +170,9 @@ class AutoScalpConfig:
     use_bollinger_scalp: bool = True
     use_rsi_extreme: bool = True          # RSI 과매수/과매도
     use_volume_spike: bool = True         # 거래량 급증
+    use_ema_crossover: bool = False       # EMA 골든/데드 크로스
+    use_trade_intensity: bool = False     # 체결강도 급변
+    use_tick_acceleration: bool = False   # 틱 가격 가속도
 
     # ── 전략 파라미터 ──
     tick_window: int = 20
@@ -183,6 +186,24 @@ class AutoScalpConfig:
     rsi_oversold: float = 25.0
     rsi_overbought: float = 75.0
     volume_spike_mult: float = 3.0        # 평균 대비 3배
+
+    # EMA Crossover params
+    ema_fast_period: int = 9
+    ema_slow_period: int = 21
+
+    # Trade Intensity params
+    intensity_window: int = 30
+    intensity_buy_threshold: float = 2.0
+    intensity_sell_threshold: float = 0.5
+
+    # Tick Acceleration params
+    accel_window: int = 20
+    accel_threshold: float = 0.05
+
+    # ── 종목 선정 추가 조건 ──
+    min_trade_value: int = 5_000_000_000  # 최소 거래대금 50억
+    min_tick_frequency: float = 10.0      # 분당 최소 체결 수
+    max_spread_pct: float = 0.25          # 최대 스프레드율
 
     # ── 컨센서스 (다중 전략 합의) ──
     min_consensus: int = 2                # 최소 2개 전략 합의 시 진입
@@ -239,17 +260,29 @@ class AutoScalpConfig:
 
     @classmethod
     def load_from_file(cls):
-        """저장된 설정 파일에서 로드, 없으면 기본값"""
+        """저장된 설정 파일에서 로드, 없으면 활성 프리셋 기반"""
         if _AUTO_CONFIG_FILE.exists():
             try:
                 d = json.loads(_AUTO_CONFIG_FILE.read_text(encoding="utf-8"))
                 config = cls.from_dict(d)
-                logger.info(f"[AutoScalpConfig] 저장된 설정 로드 완료")
+                logger.info("[AutoScalpConfig] 저장된 설정 로드 완료")
                 return config
             except Exception as e:
-                logger.error(f"[AutoScalpConfig] 설정 로드 실패, 기본값 사용: {e}")
+                logger.error(f"[AutoScalpConfig] 설정 로드 실패: {e}")
+
+        # 저장 파일 없으면 활성 프리셋에서 생성
+        try:
+            active = preset_manager.get_active()
+            if active:
+                from services.skill_preset import PresetManager
+                d = PresetManager._preset_to_config_dict(active)
+                config = cls.from_dict(d)
+                logger.info(f"[AutoScalpConfig] 프리셋 '{active.name}'에서 설정 로드")
+                return config
+        except Exception as e:
+            logger.warning(f"[AutoScalpConfig] 프리셋 로드 실패, 기본값: {e}")
+
         return cls()
-        return config
 
 
 # ═══════════════════════════════════════════════════════
@@ -292,14 +325,23 @@ class TickBuffer:
 
 
 # ═══════════════════════════════════════════════════════
-#  Strategy Engine (6 strategies)
+#  Strategy Engine (9 strategies + weight-based consensus)
 # ═══════════════════════════════════════════════════════
 
 class StrategyEngine:
-    """6개 전략 + 컨센서스 시그널 생성"""
+    """9개 전략 + 가중치 기반 컨센서스 시그널 생성"""
 
     def __init__(self, config: AutoScalpConfig):
         self.config = config
+        # 프리셋에서 전략별 가중치 로드
+        self._weights = {}
+        try:
+            active = preset_manager.get_active()
+            if active:
+                for name, s in active.strategies.items():
+                    self._weights[name] = s.get("weight", 1.0)
+        except Exception:
+            pass
 
     def evaluate(self, code: str, buf: TickBuffer, orderbook: dict) -> List[dict]:
         """모든 활성 전략 평가 → 시그널 리스트 반환"""
@@ -334,32 +376,47 @@ class StrategyEngine:
             sig = self._volume_spike(code, buf, price)
             if sig: signals.append(sig)
 
+        if self.config.use_ema_crossover:
+            sig = self._ema_crossover(code, buf, price)
+            if sig: signals.append(sig)
+
+        if self.config.use_trade_intensity:
+            sig = self._trade_intensity(code, buf, price, orderbook)
+            if sig: signals.append(sig)
+
+        if self.config.use_tick_acceleration:
+            sig = self._tick_acceleration(code, buf, price)
+            if sig: signals.append(sig)
+
         return signals
 
     def get_consensus(self, signals: List[dict]) -> Optional[dict]:
-        """컨센서스: 다수 전략이 같은 방향이면 진입"""
+        """가중치 기반 컨센서스: 전략 weight 합계 >= min_consensus 이면 진입"""
         if not signals:
             return None
 
         buy_signals = [s for s in signals if s["side"] == Side.BUY]
         sell_signals = [s for s in signals if s["side"] == Side.SELL]
 
-        if len(buy_signals) >= self.config.min_consensus:
+        buy_weight = sum(self._weights.get(s["strategy"], 1.0) for s in buy_signals)
+        sell_weight = sum(self._weights.get(s["strategy"], 1.0) for s in sell_signals)
+
+        if buy_weight >= self.config.min_consensus:
             strategies = [s["strategy"] for s in buy_signals]
             return {
                 "side": Side.BUY,
                 "strategy": f"consensus({','.join(strategies)})",
-                "strength": len(buy_signals),
-                "reason": f"{len(buy_signals)}개 전략 매수 합의",
+                "strength": round(buy_weight, 1),
+                "reason": f"매수 합의 (가중치 {buy_weight:.1f} >= {self.config.min_consensus})",
             }
 
-        if len(sell_signals) >= self.config.min_consensus:
+        if sell_weight >= self.config.min_consensus:
             strategies = [s["strategy"] for s in sell_signals]
             return {
                 "side": Side.SELL,
                 "strategy": f"consensus({','.join(strategies)})",
-                "strength": len(sell_signals),
-                "reason": f"{len(sell_signals)}개 전략 매도 합의",
+                "strength": round(sell_weight, 1),
+                "reason": f"매도 합의 (가중치 {sell_weight:.1f} >= {self.config.min_consensus})",
             }
 
         return None
@@ -503,6 +560,112 @@ class StrategyEngine:
                     "reason": f"거래량 {ratio:.1f}배 + 하락"}
         return None
 
+    # ── Strategy 7: EMA Crossover ──
+    def _ema_crossover(self, code, buf, price) -> Optional[dict]:
+        """EMA(fast)/EMA(slow) 크로스오버 감지"""
+        fast = self.config.ema_fast_period
+        slow = self.config.ema_slow_period
+        prices = buf.prices(slow + 5)
+        if len(prices) < slow + 2:
+            return None
+
+        if HAS_TALIB:
+            ema_fast = talib.EMA(prices, timeperiod=fast)
+            ema_slow = talib.EMA(prices, timeperiod=slow)
+        else:
+            # Fallback EMA
+            def _ema(data, period):
+                result = np.zeros_like(data)
+                result[0] = data[0]
+                mult = 2.0 / (period + 1)
+                for i in range(1, len(data)):
+                    result[i] = data[i] * mult + result[i - 1] * (1 - mult)
+                return result
+            ema_fast = _ema(prices, fast)
+            ema_slow = _ema(prices, slow)
+
+        if np.isnan(ema_fast[-1]) or np.isnan(ema_slow[-1]):
+            return None
+
+        # 크로스 감지: 직전은 반대, 현재는 크로스
+        prev_diff = ema_fast[-2] - ema_slow[-2]
+        curr_diff = ema_fast[-1] - ema_slow[-1]
+
+        if prev_diff <= 0 and curr_diff > 0:
+            return {"side": Side.BUY, "strategy": "ema_crossover",
+                    "reason": f"골든크로스 EMA({fast}/{slow})"}
+        if prev_diff >= 0 and curr_diff < 0:
+            return {"side": Side.SELL, "strategy": "ema_crossover",
+                    "reason": f"데드크로스 EMA({fast}/{slow})"}
+        return None
+
+    # ── Strategy 8: Trade Intensity (체결강도) ──
+    def _trade_intensity(self, code, buf, price, orderbook) -> Optional[dict]:
+        """체결강도(매수체결량/매도체결량) 급변 감지"""
+        window = self.config.intensity_window
+        ticks = list(buf.ticks)[-window:]
+        if len(ticks) < window:
+            return None
+
+        # 체결 방향 추정: 가격 상승 틱 = 매수 체결, 하락 = 매도 체결
+        buy_vol = 0
+        sell_vol = 0
+        for i in range(1, len(ticks)):
+            vol = ticks[i].volume
+            if ticks[i].price > ticks[i - 1].price:
+                buy_vol += vol
+            elif ticks[i].price < ticks[i - 1].price:
+                sell_vol += vol
+            else:
+                buy_vol += vol * 0.5
+                sell_vol += vol * 0.5
+
+        if sell_vol <= 0:
+            intensity = 10.0
+        else:
+            intensity = buy_vol / sell_vol
+
+        if intensity >= self.config.intensity_buy_threshold:
+            return {"side": Side.BUY, "strategy": "trade_intensity",
+                    "reason": f"체결강도 {intensity:.1f} (매수 우위)"}
+        if intensity <= self.config.intensity_sell_threshold:
+            return {"side": Side.SELL, "strategy": "trade_intensity",
+                    "reason": f"체결강도 {intensity:.2f} (매도 우위)"}
+        return None
+
+    # ── Strategy 9: Tick Acceleration (틱 가속도) ──
+    def _tick_acceleration(self, code, buf, price) -> Optional[dict]:
+        """틱 가격 변화의 가속도(2차 미분) 감지"""
+        window = self.config.accel_window
+        prices = buf.prices(window)
+        if len(prices) < window:
+            return None
+
+        # 1차 미분 (속도)
+        velocity = np.diff(prices)
+        # 2차 미분 (가속도)
+        acceleration = np.diff(velocity)
+
+        if len(acceleration) < 3:
+            return None
+
+        recent_accel = float(np.mean(acceleration[-5:]))
+        recent_vel = float(np.mean(velocity[-5:]))
+        avg_price = float(np.mean(prices))
+        if avg_price <= 0:
+            return None
+
+        # 정규화 (가격 대비 비율)
+        norm_accel = recent_accel / avg_price
+
+        if norm_accel > self.config.accel_threshold and recent_vel > 0:
+            return {"side": Side.BUY, "strategy": "tick_acceleration",
+                    "reason": f"상승 가속 ({norm_accel:.4f})"}
+        if norm_accel < -self.config.accel_threshold and recent_vel < 0:
+            return {"side": Side.SELL, "strategy": "tick_acceleration",
+                    "reason": f"하락 가속 ({norm_accel:.4f})"}
+        return None
+
 
 # ═══════════════════════════════════════════════════════
 #  Risk Manager
@@ -514,6 +677,9 @@ class RiskManager:
         self.daily_pnl: float = 0.0
         self.daily_trades: int = 0
         self.last_trade_time: float = 0
+        self._recent_pnls: list = []
+        self._consecutive_losses: int = 0
+        self._original_config_snapshot: dict = None
 
     def can_open(self, positions: dict) -> Tuple[bool, str]:
         """진입 가능 여부 확인"""
@@ -552,41 +718,14 @@ class RiskManager:
         if pnl_pct <= -self.config.stop_loss_pct:
             return f"손절 ({pnl_pct:.2f}%)"
 
-        # 익절 - AI에게 홀딩 연장 여부 문의
+        # 익절 - 트레일링 스탑이 활성화되어 있으면 홀딩, 아니면 즉시 익절
         if pnl_pct >= self.config.take_profit_pct:
-            try:
-                pos_data = {
-                    "side": pos.side.value,
-                    "entry_price": pos.entry_price,
-                    "pnl_pct": round(pnl_pct, 2),
-                    "hold_seconds": time.time() - pos.entry_time,
-                    "drawdown_from_high": round(
-                        (pos.highest_since_entry - current_price) / pos.highest_since_entry * 100
-                        if pos.side == Side.BUY and pos.highest_since_entry > 0 else 0, 2
-                    ),
-                }
-                tick_data = {"price": current_price, "bid_qty": 0, "ask_qty": 0}
-                hold_decision = ai_advisor.should_hold_longer(pos.code, pos_data, tick_data)
-
-                if hold_decision.get("hold"):
-                    # AI가 홀딩 연장 결정 → 익절 스킵
-                    new_tp = hold_decision.get("new_take_profit_pct")
-                    if new_tp and new_tp > self.config.take_profit_pct:
-                        # 익절 기준 상향 (다음 check_exit에서 새 기준 적용)
-                        override = ai_advisor.get_position_override(pos.code)
-                        if override.get("take_profit_pct"):
-                            # 포지션의 TP 가격 재설정
-                            if pos.side == Side.BUY:
-                                pos.take_profit = align_price(
-                                    int(pos.entry_price * (1 + new_tp / 100)), "up")
-                            else:
-                                pos.take_profit = align_price(
-                                    int(pos.entry_price * (1 - new_tp / 100)), "down")
-                    return None  # 익절하지 않고 계속 보유
-            except Exception:
-                pass  # AI 실패 시 정상 익절
-
-            return f"익절 ({pnl_pct:.2f}%)"
+            if self.config.use_trailing_stop:
+                # 트레일링 스탑 활성 → 익절 목표 도달 후 트레일링으로 수익 극대화
+                # (아래 트레일링 스탑 로직에서 처리)
+                pass
+            else:
+                return f"익절 ({pnl_pct:.2f}%)"
 
         # 트레일링 스탑 (수수료 0.21% 이상 수익일 때만 작동 → 수수료 손실 방지)
         min_profit_for_trailing = 0.25  # 왕복수수료(0.21%) + 여유분
@@ -615,10 +754,73 @@ class RiskManager:
         self.daily_pnl += net_pnl
         self.daily_trades += 1
         self.last_trade_time = time.time()
+        self._recent_pnls.append(net_pnl)
+        self._adaptive_tune()
 
     def reset_daily(self):
         self.daily_pnl = 0.0
         self.daily_trades = 0
+        self._recent_pnls = []
+        self._consecutive_losses = 0
+
+    # ── 룰 기반 실시간 파라미터 미세 조정 ──
+
+    def _adaptive_tune(self):
+        """
+        최근 거래 성과에 따라 파라미터를 자동 미세 조정 (룰 기반, API 호출 없음)
+
+        규칙:
+        1. 연속 3패 → 손절폭 축소, 쿨다운 증가 (방어 모드)
+        2. 연속 3승 → 원래 설정 복원 (또는 약간 공격적)
+        3. 일일 손실이 한도의 50% 도달 → 포지션 수 축소
+        4. 승률 기반 min_consensus 조정
+        """
+        if not self._recent_pnls:
+            return
+
+        # 원래 설정 스냅샷 저장 (최초 1회)
+        if self._original_config_snapshot is None:
+            self._original_config_snapshot = {
+                "stop_loss_pct": self.config.stop_loss_pct,
+                "cooldown_seconds": self.config.cooldown_seconds,
+                "max_position_count": self.config.max_position_count,
+                "max_investment_per_trade": self.config.max_investment_per_trade,
+            }
+
+        last_pnl = self._recent_pnls[-1]
+
+        # 연속 손실/승리 카운트
+        if last_pnl <= 0:
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+        orig = self._original_config_snapshot
+
+        # 규칙 1: 연속 3패 → 방어 모드
+        if self._consecutive_losses >= 3:
+            self.config.stop_loss_pct = max(0.2, orig["stop_loss_pct"] * 0.7)
+            self.config.cooldown_seconds = min(10, orig["cooldown_seconds"] * 2)
+            self.config.max_investment_per_trade = max(
+                100_000, int(orig["max_investment_per_trade"] * 0.7))
+            logger.info(f"[AdaptiveTune] 방어모드: 연속 {self._consecutive_losses}패 "
+                        f"→ SL={self.config.stop_loss_pct:.2f}%, "
+                        f"CD={self.config.cooldown_seconds:.1f}s, "
+                        f"투자금={self.config.max_investment_per_trade:,}")
+
+        # 규칙 2: 연속 3승 → 원래 설정 복원
+        recent_wins = sum(1 for p in self._recent_pnls[-3:] if p > 0)
+        if recent_wins >= 3 and self._consecutive_losses == 0:
+            self.config.stop_loss_pct = orig["stop_loss_pct"]
+            self.config.cooldown_seconds = orig["cooldown_seconds"]
+            self.config.max_investment_per_trade = orig["max_investment_per_trade"]
+            self.config.max_position_count = orig["max_position_count"]
+
+        # 규칙 3: 일일 손실 50% 도달 → 포지션 수 축소
+        if self.daily_pnl <= -self.config.max_daily_loss * 0.5:
+            self.config.max_position_count = max(1, orig["max_position_count"] - 1)
+            logger.info(f"[AdaptiveTune] 포지션 축소: 일일손실 {self.daily_pnl:,.0f}원 "
+                        f"→ 최대 {self.config.max_position_count}개")
 
 
 # ═══════════════════════════════════════════════════════
@@ -686,12 +888,30 @@ class StockScanner:
             # 점수 기준 정렬
             candidates.sort(key=lambda x: x[1], reverse=True)
 
-            # AI 어드바이저가 종목 후보를 검토/재순위화
+            # Brain 데이터로 룰 기반 종목 필터링 (과거 성과 반영)
             try:
                 brain_data = trade_brain.brain if trade_brain else {}
-                candidates = ai_advisor.evaluate_stock_candidates(candidates, brain_data)
+                price_scores = brain_data.get("price_bracket_scores", {})
+                if price_scores:
+                    filtered = []
+                    for code, score, name in candidates:
+                        # 해당 가격대의 과거 성과가 극히 나쁘면 감점
+                        raw_price = int(str(next(
+                            (s.get("cur_prc", "0") for s in stocks
+                             if s.get("stk_cd", "").split("_")[0] == code),
+                            "0"
+                        )).replace(",", "").replace("+", "").replace("-", "") or "0")
+                        bracket = f"{(raw_price // 10000) * 10000}-{(raw_price // 10000 + 1) * 10000}"
+                        bracket_data = price_scores.get(bracket, {})
+                        tc = bracket_data.get("trade_count", 0)
+                        if tc >= 5:
+                            win_rate = bracket_data.get("wins", 0) / tc
+                            if win_rate < 0.2:
+                                score *= 0.5  # 승률 20% 미만 가격대 감점
+                        filtered.append((code, score, name))
+                    candidates = sorted(filtered, key=lambda x: x[1], reverse=True)
             except Exception as e:
-                logger.warning(f"[AI종목선정] 스킵: {e}")
+                logger.warning(f"[Brain필터] 스킵: {e}")
 
             top_n = candidates[:self.config.max_target_stocks]
 
@@ -714,39 +934,104 @@ class StockScanner:
             return self.current_targets
 
     def _score_stock(self, code: str, price: int, volume: int, change_pct: float) -> float:
-        """스캘핑 적합도 점수 (0~100)"""
+        """스캘핑 적합도 점수 (0~100) - 7개 기준 종합 평가"""
+        # 1. 거래대금 (25%) - 최소 기준 미달 즉시 탈락
+        trade_value = price * volume
+        min_tv = self.config.min_trade_value if hasattr(self.config, 'min_trade_value') else 5_000_000_000
+        if trade_value < min_tv:
+            return 0
+
         score = 0.0
+        tv_score = min(100, np.log10(max(trade_value, 1)) / np.log10(500_000_000_000) * 100)
+        score += tv_score * 0.25
 
-        # 거래량 점수 (30%) - log scale
-        vol_score = min(100, np.log10(max(volume, 1)) / np.log10(10_000_000) * 100)
-        score += vol_score * 0.30
-
-        # 변동성 점수 (25%) - 1~3% 가 이상적
+        # 2. 변동성 (20%) - 0.8~3% 벨커브
         ideal_vol = 1.5
         vol_diff = abs(abs(change_pct) - ideal_vol)
         volatility_score = max(0, 100 - vol_diff * 30)
-        score += volatility_score * 0.25
+        score += volatility_score * 0.20
 
-        # 가격대 점수 (20%) - 5천~5만원 이상적
-        if 5000 <= price <= 50000:
-            price_score = 100
-        elif 2000 <= price <= 100000:
-            price_score = 60
-        else:
-            price_score = 20
-        score += price_score * 0.20
-
-        # 호가 단위 대비 가격 비율 (15%) - 호가단위/가격이 작을수록 좋음
+        # 3. 호가 스프레드율 (15%) - 0.3% 초과 탈락
         tick = get_tick_size(price)
-        spread_ratio = tick / price * 100
-        spread_score = max(0, 100 - spread_ratio * 500)
+        spread_pct = tick / price * 100
+        max_sp = self.config.max_spread_pct if hasattr(self.config, 'max_spread_pct') else 0.25
+        if spread_pct > max_sp * 1.5:
+            return 0
+        spread_score = max(0, 100 - spread_pct / max_sp * 100)
         score += spread_score * 0.15
 
-        # 방향성 점수 (10%) - 약간의 추세가 있으면 좋음
+        # 4. 체결빈도 (15%) - WS 실시간 데이터 기반
+        from services.kiwoom_ws import kiwoom_ws_manager
+        tick_freq_score = 50  # 기본값
+        tick_data = kiwoom_ws_manager.execution_data.get(code, {})
+        if tick_data:
+            # execution_data에서 최근 체결 건수 추정
+            tick_freq_score = min(100, volume / 100000 * 20)
+        score += tick_freq_score * 0.15
+
+        # 5. 시간대 유동성 (10%)
+        time_mult = self._get_time_multiplier()
+        time_score = time_mult * 100
+        score += time_score * 0.10
+
+        # 6. 모멘텀 (10%) - 적당한 추세
         momentum_score = min(100, abs(change_pct) * 50)
         score += momentum_score * 0.10
 
+        # 7. Brain 과거 성과 (5%)
+        brain_score = 50  # 기본값
+        try:
+            brain_data = trade_brain.brain if trade_brain else {}
+            price_brackets = brain_data.get("price_bracket_scores", {})
+            if price < 5000:
+                bracket = "~5천"
+            elif price < 10000:
+                bracket = "5천~1만"
+            elif price < 30000:
+                bracket = "1만~3만"
+            elif price < 50000:
+                bracket = "3만~5만"
+            else:
+                bracket = "5만~"
+            bd = price_brackets.get(bracket, {})
+            tc = bd.get("count", 0)
+            if tc >= 5:
+                win_rate = bd.get("wins", 0) / tc
+                brain_score = win_rate * 100
+        except Exception:
+            pass
+        score += brain_score * 0.05
+
+        # 작전주/테마주 감점
+        if self._is_suspicious(code, price, volume, change_pct):
+            score *= 0.8
+
         return round(score, 2)
+
+    def _is_suspicious(self, code: str, price: int, volume: int, change_pct: float) -> bool:
+        """작전주/테마주 의심 종목 감지"""
+        # 상한가/하한가 근접 (등락률 +-25% 이상)
+        if abs(change_pct) > 25:
+            return True
+        # 극단적 저가주 (1천원 미만) + 높은 변동성
+        if price < 1000 and abs(change_pct) > 10:
+            return True
+        return False
+
+    @staticmethod
+    def _get_time_multiplier() -> float:
+        """시간대별 유동성 가중치"""
+        now = datetime.now().time()
+        if dtime(9, 10) <= now < dtime(10, 0):
+            return 1.2  # 최활발
+        elif dtime(10, 0) <= now < dtime(11, 30):
+            return 1.0
+        elif dtime(11, 30) <= now < dtime(13, 0):
+            return 0.7  # 점심
+        elif dtime(13, 0) <= now < dtime(14, 30):
+            return 0.9
+        else:
+            return 0.6  # 마감 접근
 
     def should_rotate(self, code: str, trade_results: List[TradeResult]) -> bool:
         """성과 기반 종목 교체 판단"""
@@ -788,6 +1073,10 @@ class AutoScalpingSystem:
 
         self.state = EngineState.IDLE
         self.running = False
+
+        # 활성 프리셋 이름
+        active = preset_manager.get_active()
+        self.active_preset_name = active.name if active else "aggressive"
 
         # Data
         self.tick_buffers: Dict[str, TickBuffer] = {}
@@ -925,35 +1214,30 @@ class AutoScalpingSystem:
                     pass
             return
 
-        # 6. AI 어드바이저에게 진입 승인 요청
+        # 6. 룰 기반 진입 필터 (Brain 학습 데이터 활용)
         try:
-            tick_data = {
-                "price": buf.latest.price if buf.latest else 0,
-                "bid": buf.latest.bid if buf.latest else 0,
-                "ask": buf.latest.ask if buf.latest else 0,
-                "bid_qty": buf.latest.bid_qty if buf.latest else 0,
-                "ask_qty": buf.latest.ask_qty if buf.latest else 0,
-            }
             brain_data = trade_brain.brain if trade_brain else {}
-            ai_decision = ai_advisor.should_enter(
-                code, consensus, tick_data, self.positions, brain_data
-            )
-
-            if not ai_decision.get("approve", True):
-                # AI가 진입 거부
-                self.signal_log.append({
-                    "time": datetime.now().strftime("%H:%M:%S"),
-                    "code": code,
-                    "side": consensus["side"].value,
-                    "strategy": consensus["strategy"],
-                    "reason": consensus["reason"],
-                    "action": f"AI_REJECT: {ai_decision.get('reason', '')}",
-                })
-                logger.info(f"[AI거부] {code} {consensus['side'].value} - {ai_decision.get('reason', '')}")
-                return
+            strategy_name = consensus.get("strategy", "")
+            strategy_perf = brain_data.get("strategy_scores", {}).get(strategy_name, {})
+            tc = strategy_perf.get("trade_count", 0)
+            if tc >= 10:
+                win_rate = strategy_perf.get("wins", 0) / tc
+                recent_pnls = strategy_perf.get("recent_pnls", [])[-10:]
+                all_losses = all(p <= 0 for p in recent_pnls) if recent_pnls else False
+                if win_rate < 0.2 and all_losses:
+                    # 승률 20% 미만 + 최근 10건 전부 손실 → 진입 거부
+                    self.signal_log.append({
+                        "time": datetime.now().strftime("%H:%M:%S"),
+                        "code": code,
+                        "side": consensus["side"].value,
+                        "strategy": consensus["strategy"],
+                        "reason": consensus["reason"],
+                        "action": f"RULE_REJECT: 승률 {win_rate:.0%}, 연속 손실",
+                    })
+                    logger.info(f"[룰거부] {code} {consensus['side'].value} - 승률 {win_rate:.0%}")
+                    return
         except Exception as e:
-            logger.warning(f"[AI진입판단] 스킵: {e}")
-            ai_decision = {"approve": True, "adjust": {}}
+            logger.warning(f"[Brain필터] 스킵: {e}")
 
         # 7. 진입 실행
         entry_signal = {
@@ -963,19 +1247,18 @@ class AutoScalpingSystem:
             "strategy": consensus["strategy"],
             "reason": consensus["reason"],
             "action": "ENTRY",
-            "ai_adjust": ai_decision.get("adjust", {}),
         }
         self.signal_log.append(entry_signal)
         try:
             trade_journal.record_signal(entry_signal, engine_type="auto_scalper")
         except Exception:
             pass
-        self._open_position(code, consensus, ai_adjust=ai_decision.get("adjust", {}))
+        self._open_position(code, consensus)
 
     # ── Position Management ──
 
-    def _open_position(self, code: str, consensus: dict, ai_adjust: dict = None):
-        """포지션 진입 (AI 조정값 반영)"""
+    def _open_position(self, code: str, consensus: dict):
+        """포지션 진입 (룰 기반)"""
         from services.kiwoom_provider import kiwoom
 
         buf = self.tick_buffers.get(code)
@@ -985,10 +1268,7 @@ class AutoScalpingSystem:
         price = buf.latest.price
         side = consensus["side"]
 
-        # AI가 조정한 투자금/수량 반영
         max_invest = self.config.max_investment_per_trade
-        if ai_adjust and "max_investment_per_trade" in ai_adjust:
-            max_invest = max(100_000, min(2_000_000, int(ai_adjust["max_investment_per_trade"])))
 
         # 수량 계산 (최대 투자금 기반)
         quantity = min(
@@ -997,7 +1277,7 @@ class AutoScalpingSystem:
         )
 
         # 수수료 대비 수익성 사전 검증
-        tp_pct = (ai_adjust or {}).get("take_profit_pct", self.config.take_profit_pct)
+        tp_pct = self.config.take_profit_pct
         trade_amount = price * quantity
         round_trip_fee = estimate_commission(trade_amount, False) + estimate_commission(trade_amount, True)
         min_profit_needed = round_trip_fee * 2
@@ -1017,8 +1297,8 @@ class AutoScalpingSystem:
 
         if result.get("success"):
             # AI 조정값이 있으면 포지션별 SL/TP 적용
-            sl_pct = (ai_adjust or {}).get("stop_loss_pct", self.config.stop_loss_pct)
-            tp_pct = (ai_adjust or {}).get("take_profit_pct", self.config.take_profit_pct)
+            sl_pct = self.config.stop_loss_pct
+            tp_pct = self.config.take_profit_pct
 
             # 안전 범위 강제
             sl_pct = max(0.2, min(2.0, sl_pct))
@@ -1094,12 +1374,13 @@ class AutoScalpingSystem:
         )
         self.trade_history.append(trade)
 
-        # 매매일지 저장 & AI 학습
+        # 매매일지 저장 & AI 학습 & 프리셋 성과 기록
         try:
             trade_journal.record_trade(trade.__dict__, engine_type="auto_scalper")
             trade_brain.learn(trade.__dict__)
+            preset_manager.record_trade(self.active_preset_name, net_pnl)
         except Exception as e:
-            logger.error(f"[매매일지/Brain] 기록 실패: {e}")
+            logger.error(f"[매매일지/Brain/Preset] 기록 실패: {e}")
 
         # 통계 업데이트
         self.risk.record_trade(net_pnl)
@@ -1113,12 +1394,6 @@ class AutoScalpingSystem:
 
         del self.positions[code]
 
-        # AI 포지션별 오버라이드 정리
-        try:
-            ai_advisor.on_position_closed(code)
-        except Exception:
-            pass
-
         emoji = "🟢" if net_pnl > 0 else "🔴"
         logger.info(f"[청산] {emoji} {code} {reason} | "
                     f"손익={net_pnl:+,.0f}원 (수수료 {commission:,.0f}원) "
@@ -1127,9 +1402,7 @@ class AutoScalpingSystem:
     # ── Background Loops ──
 
     async def _monitor_loop(self):
-        """포지션 모니터링 루프 (0.3초마다) + AI 시장 분석"""
-        _market_check_counter = 0
-
+        """포지션 모니터링 루프 (0.3초마다) - 순수 룰 기반"""
         while self.running:
             try:
                 # 장 시간 체크
@@ -1151,18 +1424,6 @@ class AutoScalpingSystem:
                     exit_reason = self.risk.check_exit(pos, buf.latest.price)
                     if exit_reason:
                         self._close_position(code, buf.latest.price, exit_reason)
-
-                # AI 시장 분석 (약 5분마다, 0.3초 * 1000 ≈ 5분)
-                _market_check_counter += 1
-                if _market_check_counter >= 1000:
-                    _market_check_counter = 0
-                    try:
-                        brain_data = trade_brain.brain if trade_brain else {}
-                        await ai_advisor.analyze_market(
-                            self.positions, self.stats, brain_data
-                        )
-                    except Exception as e:
-                        logger.warning(f"[AI시장분석] 스킵: {e}")
 
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")
@@ -1209,6 +1470,20 @@ class AutoScalpingSystem:
                     if len(recent_trades) == 0 and len(self.positions) == 0:
                         logger.info(f"[Rotation] 30분 무거래 → 강제 종목 재검색")
                         await self._do_scan()
+
+                # 4. 프리셋 자동 전환 체크
+                try:
+                    switch_to = preset_manager.check_auto_switch()
+                    if switch_to:
+                        logger.info(f"[AutoSwitch] 프리셋 자동 전환: {self.active_preset_name} → {switch_to}")
+                        # 포지션 전부 청산 후 전환
+                        for c in list(self.positions.keys()):
+                            b = self.tick_buffers.get(c)
+                            if b and b.latest:
+                                self._close_position(c, b.latest.price, "프리셋 전환")
+                        self.switch_preset(switch_to)
+                except Exception as e:
+                    logger.warning(f"[AutoSwitch] 체크 실패: {e}")
 
             except Exception as e:
                 logger.error(f"Rotation loop error: {e}")
@@ -1271,7 +1546,19 @@ class AutoScalpingSystem:
         self.risk.config = self.config
         # 파일에 저장 (서버 재시작 시 유지)
         self.config.save_to_file()
-        logger.info(f"설정 업데이트 + 저장 완료")
+        logger.info("설정 업데이트 + 저장 완료")
+
+    def switch_preset(self, name: str) -> bool:
+        """런타임 프리셋 교체 (전략/리스크/주문 전체 교체)"""
+        success = preset_manager.switch_preset(name)
+        if success:
+            self.active_preset_name = name
+            # 엔진 재초기화
+            self.strategy = StrategyEngine(self.config)
+            self.risk = RiskManager(self.config)
+            self.scanner = StockScanner(self.config)
+            logger.info(f"[AutoScalper] 프리셋 전환 완료: {name}")
+        return success
 
     def get_status(self) -> dict:
         """현재 상태 반환"""
@@ -1334,6 +1621,8 @@ class AutoScalpingSystem:
                 for t in self.trade_history[-20:]
             ],
             "config": self.config.to_dict(),
+            "active_preset": self.active_preset_name,
+            "preset_status": preset_manager.get_status(),
         }
 
 

@@ -1,22 +1,23 @@
 """
-AI Advisor - Claude AI가 스캘핑 매매 전체를 실시간 제어
+AI Advisor - Claude AI 감독관 모드 (1일 1~2회 전략 리뷰)
 
-개입 지점:
-1. 종목 탐색: AI가 종목 후보를 검토하고 순위 재조정
-2. 진입 판단: 컨센서스 시그널 발생 시 AI가 진입 승인/거부
-3. 포지션 관리: 익절/손절 기준을 포지션별로 동적 조정
-4. 시장 분석: 주기적으로 시장 상황 판단, 공격/방어 모드 전환
+아키텍처:
+  [실시간 데이터] → [경량 룰 기반 엔진] → [주문 실행]
+       ↑                                      ↓
+  [Claude API: 1일 1~2회 전략 리뷰]       [거래 로그 축적]
+
+핵심 판단은 룰 기반 엔진(if/else + 기술적 지표)이 담당하고,
+Claude는 일간/주간 단위로 전략 성과를 리뷰하고 파라미터를 조정하는 "감독관" 역할.
 
 안전 규칙 (절대 위반 불가):
 - 계좌 잔고 이내에서만 거래
-- ���수/신용거래 절대 금지
+- 미수/신용거래 절대 금지
 - 일일 손실한도 준수
 """
 import json
 import logging
 import os
 import time
-import asyncio
 from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
@@ -28,46 +29,22 @@ if _env_path.exists():
 logger = logging.getLogger(__name__)
 
 
-# AI 판�� 결과 캐시 (같은 종목에 대�� 짧은 시간 내 중복 호출 방지)
-class _Cache:
-    def __init__(self, ttl=5):
-        self._data = {}
-        self._ttl = ttl
-
-    def get(self, key):
-        entry = self._data.get(key)
-        if entry and time.time() - entry["time"] < self._ttl:
-            return entry["value"]
-        return None
-
-    def set(self, key, value):
-        self._data[key] = {"value": value, "time": time.time()}
-
-    def clear(self):
-        self._data.clear()
-
-
 class AIAdvisor:
-    """Claude AI 실시간 매매 어드바이저"""
+    """Claude AI 감독관 - 일간/주간 전략 리뷰 및 파라미터 조정"""
 
     def __init__(self):
         self._client = None
-        self._cache = _Cache(ttl=10)  # 10초 캐시
 
-        # 시장 판단 상태
-        self.market_mode = "normal"  # normal / aggressive / defensive
-        self.last_market_analysis = None
-        self.market_analysis_interval = 300  # 5분마다 시장 분석
+        # 리뷰 상태
+        self.last_review_time = None
+        self.last_review_result = None
+        self.review_history = self._load_review_history()
 
-        # 포지션별 AI 조정값
-        self.position_overrides = {}
-        # {code: {"take_profit_pct": 2.0, "stop_loss_pct": 0.3, "reason": "..."}}
+        # 리뷰 로그 파일
+        self._log_file = Path(__file__).parent.parent.parent / "trading_journals" / "ai_reviews.json"
 
-        # AI ���단 로그
-        self._log_file = Path(__file__).parent.parent.parent / "trading_journals" / "ai_decisions.json"
-        self._decisions = self._load_decisions()
-
-        logger.info(f"[AIAdvisor] 초기화 | API 사용 가능: {self.available}")
+        logger.info(f"[AIAdvisor] 감독관 모드 초기화 | API 사용 가능: {self.available}")
+        logger.info(f"[AIAdvisor] 과거 리뷰 {len(self.review_history)}건 로드")
 
     def _reset_client(self):
         """API 키 변경 시 클라이언트 리셋"""
@@ -76,7 +53,6 @@ class AIAdvisor:
     @property
     def client(self):
         if self._client is None:
-            # .env를 매번 다시 로드 (키 변경 대응)
             if _env_path.exists():
                 load_dotenv(_env_path, override=True)
             api_key = os.getenv("ANTHROPIC_API_KEY", "")
@@ -93,423 +69,539 @@ class AIAdvisor:
         return self.client is not None
 
     # ════════════════════════════════════════════
-    #  1. 종목 탐색 개입
+    #  1. 일간 전략 리뷰 (하루 1~2회 수동/스케줄 호출)
     # ════════════════════════════════════════════
 
-    def evaluate_stock_candidates(self, candidates: list, brain_data: dict) -> list:
+    def daily_strategy_review(self, trade_history: list, stats: dict,
+                               brain_data: dict, current_config: dict) -> dict:
         """
-        종목 후보 리스트를 AI가 검토하여 재순위화
+        일간 전략 리뷰: 오늘 거래 성과를 분석하고 파라미터 조정안 제시
 
         Parameters:
-            candidates: [(code, score, name), ...]
+            trade_history: 오늘의 거래 내역 리스트
+            stats: 오늘의 통계 (wins, losses, total_net_pnl, total_trades 등)
             brain_data: trade_brain의 학습 데이터
+            current_config: 현재 엔진 설정 (AutoScalpConfig.to_dict())
 
         Returns:
-            재순위화된 candidates 리스트
+            {
+                "review_type": "daily",
+                "timestamp": "...",
+                "performance_summary": "...",
+                "parameter_changes": {...},
+                "strategy_recommendations": [...],
+                "risk_assessment": "...",
+                "next_action": "..."
+            }
         """
-        if not self.available or not candidates:
-            return candidates
-
-        cache_key = f"scan_{','.join(c[0] for c in candidates[:5])}"
-        cached = self._cache.get(cache_key)
-        if cached:
-            return cached
+        if not self.available:
+            return {"error": "Claude API 미사용", "parameter_changes": {}}
 
         try:
-            # brain에서 종목별 과거 성과 추출
-            price_scores = brain_data.get("price_bracket_scores", {})
-            strategy_scores = brain_data.get("strategy_scores", {})
+            # 거래 내역 요약 (최근 50건)
+            recent_trades = trade_history[-50:] if trade_history else []
+            trade_summary = []
+            for t in recent_trades:
+                entry = t if isinstance(t, dict) else t.__dict__
+                trade_summary.append({
+                    "strategy": entry.get("strategy", ""),
+                    "net_pnl": entry.get("net_pnl", 0),
+                    "pnl_pct": entry.get("pnl_pct", 0),
+                    "hold_seconds": entry.get("hold_seconds", 0),
+                    "exit_reason": entry.get("exit_reason", ""),
+                })
 
-            prompt = f"""당신은 한국 주식 초단타 스캘핑 종목 선정 AI��니다.
+            # 전략별 성과 집계
+            strategy_perf = brain_data.get("strategy_scores", {})
+            strategy_summary = {}
+            for name, s in strategy_perf.items():
+                tc = s.get("trade_count", 0)
+                if tc == 0:
+                    continue
+                strategy_summary[name] = {
+                    "거래수": tc,
+                    "승률": round(s.get("wins", 0) / tc * 100, 1),
+                    "총손익": round(s.get("total_pnl", 0)),
+                    "평균보유": round(s.get("hold_sum", 0) / tc, 1),
+                    "최근5건": s.get("recent_pnls", [])[-5:],
+                }
 
-## 종목 후보 (스캔 결과)
-{json.dumps([(c[0], c[2], round(c[1], 1)) for c in candidates[:10]], ensure_ascii=False)}
-형식: [코드, 종목명, 기존점수]
+            # 시간대별 성과
+            time_scores = brain_data.get("time_scores", {})
 
-## 과거 가격대별 성과
-{json.dumps(price_scores, ensure_ascii=False)}
+            # 청산사유별 패턴
+            exit_patterns = brain_data.get("exit_patterns", {})
 
-## 전략별 최근 성과
-{json.dumps({{k: {{"승률": round(v["wins"]/v["trade_count"]*100 if v["trade_count"]>0 else 0, 1), "거래수": v["trade_count"]}} for k, v in strategy_scores.items()}}, ensure_ascii=False)}
+            # 과거 AI 리뷰 인사이트 (최근 3건)
+            past_insights = [r.get("performance_summary", "") for r in self.review_history[-3:]]
 
-## 현재 시장 모드: {self.market_mode}
+            prompt = f"""당신은 한국 주식(KRX) 초단타 스캘핑 전략의 감독관 AI입니다.
+1일 1~2회 호출되어 전략 성과를 리뷰하고 파라미터를 조정합니다.
+
+## 오늘 거래 통계
+- 총 거래: {stats.get('total_trades', 0)}회
+- 승: {stats.get('wins', 0)} / 패: {stats.get('losses', 0)}
+- 순손익: {stats.get('total_net_pnl', 0):+,.0f}원
+- 수수료 합계: {stats.get('total_commission', 0):,.0f}원
+
+## 전략별 누적 성과
+{json.dumps(strategy_summary, ensure_ascii=False, indent=2)}
+
+## 시간대별 성과
+{json.dumps(time_scores, ensure_ascii=False)}
+
+## 청산사유 패턴
+{json.dumps(exit_patterns, ensure_ascii=False)}
+
+## 최근 거래 내역 (최대 50건)
+{json.dumps(trade_summary, ensure_ascii=False)}
+
+## 현재 엔진 설정
+{json.dumps(current_config, ensure_ascii=False, indent=2)}
+
+## 과거 리뷰 인사이트
+{json.dumps(past_insights, ensure_ascii=False)}
 
 ## 요청
-상위 5개 종목을 선정하세요. 반드시 아래 JSON만 답하세요:
+오늘의 전략 성과를 종합 분석하고, 내일 적용할 파라미터 조정안을 제시하세요.
+
+반드시 아래 JSON 형식으로만 답하세요:
 ```json
-{{"selected": ["코드1", "코드2", ...], "reason": "선정 이유"}}
+{{
+  "performance_summary": "오늘 성과 요약 (2~3문장)",
+  "parameter_changes": {{
+    "파라미터명": 값,
+    ...
+  }},
+  "strategy_recommendations": [
+    "전략 조정 권고 1",
+    "전략 조정 권고 2"
+  ],
+  "risk_assessment": "리스크 평가 (1문장)",
+  "next_action": "내일 핵심 실행 사항 (1문장)"
+}}
+```
+
+파라미터 조정 규칙:
+- stop_loss_pct: 0.2 ~ 2.0 (왕복수수료 0.21% 고려)
+- take_profit_pct: 0.3 ~ 5.0
+- trailing_stop_pct: 0.15 ~ 2.0
+- max_investment_per_trade: 100,000 ~ 2,000,000
+- max_position_count: 1 ~ 5
+- min_consensus: 1 ~ 4
+- max_hold_seconds: 30 ~ 600
+- max_daily_loss: 10,000 ~ 200,000
+- max_daily_trades: 10 ~ 200
+- tick_momentum_threshold: 0.5 ~ 0.9
+- vwap_entry_deviation: 0.1 ~ 1.0
+- imbalance_threshold: 1.5 ~ 5.0
+- bb_std: 1.5 ~ 3.0
+- rsi_oversold: 15 ~ 35
+- rsi_overbought: 65 ~ 85
+- volume_spike_mult: 2.0 ~ 5.0
+- scan_interval_seconds: 30 ~ 300
+- 승률이 30% 미만인 전략은 비활성화 권고 (use_xxx: false)
+- 변경이 필요 없으면 빈 객체 {{}}
+"""
+
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = self._parse_json(response.content[0].text)
+
+            review = {
+                "review_type": "daily",
+                "timestamp": datetime.now().isoformat(),
+                "performance_summary": result.get("performance_summary", ""),
+                "parameter_changes": self._validate_params(result.get("parameter_changes", {})),
+                "strategy_recommendations": result.get("strategy_recommendations", []),
+                "risk_assessment": result.get("risk_assessment", ""),
+                "next_action": result.get("next_action", ""),
+                "stats_snapshot": {
+                    "trades": stats.get("total_trades", 0),
+                    "wins": stats.get("wins", 0),
+                    "losses": stats.get("losses", 0),
+                    "net_pnl": stats.get("total_net_pnl", 0),
+                },
+            }
+
+            self.last_review_time = time.time()
+            self.last_review_result = review
+            self._save_review(review)
+
+            logger.info(f"[AIAdvisor] 일간 리뷰 완료: {review['performance_summary']}")
+            logger.info(f"[AIAdvisor] 파라미터 조정: {review['parameter_changes']}")
+            return review
+
+        except Exception as e:
+            logger.error(f"[AIAdvisor] 일간 리뷰 실패: {e}")
+            return {"error": str(e), "parameter_changes": {}}
+
+    # ════════════════════════════════════════════
+    #  2. 주간 심층 리뷰
+    # ════════════════════════════════════════════
+
+    def weekly_deep_review(self, brain_data: dict, current_config: dict,
+                           weekly_trades: list) -> dict:
+        """
+        주간 심층 리뷰: 일주일 전략 트렌드 분석 및 근본적 전략 재설계 검토
+
+        Parameters:
+            brain_data: trade_brain의 전체 학습 데이터
+            current_config: 현재 엔진 설정
+            weekly_trades: 이번 주 전체 거래 내역
+
+        Returns:
+            리뷰 결과 dict
+        """
+        if not self.available:
+            return {"error": "Claude API 미사용", "parameter_changes": {}}
+
+        try:
+            strategy_scores = brain_data.get("strategy_scores", {})
+            time_scores = brain_data.get("time_scores", {})
+            price_brackets = brain_data.get("price_bracket_scores", {})
+            ai_insights = brain_data.get("ai_insights", [])
+            evolution_log = brain_data.get("evolution_log", [])
+
+            # 일주일 거래 집계
+            weekly_pnl = sum(
+                (t.get("net_pnl", 0) if isinstance(t, dict) else getattr(t, "net_pnl", 0))
+                for t in weekly_trades
+            )
+            weekly_count = len(weekly_trades)
+
+            # 일별 리뷰 히스토리 (이번 주)
+            recent_reviews = self.review_history[-7:]
+
+            prompt = f"""당신은 한국 주식(KRX) 초단타 스캘핑 전략의 주간 감독관 AI입니다.
+일주일치 데이터를 기반으로 전략의 근본적인 방향을 리뷰합니다.
+
+## 주간 실적
+- 총 거래: {weekly_count}회
+- 주간 순손익: {weekly_pnl:+,.0f}원
+
+## 전략별 누적 성과
+{json.dumps(strategy_scores, ensure_ascii=False, indent=2)}
+
+## 시간대별 성과
+{json.dumps(time_scores, ensure_ascii=False)}
+
+## 가격대별 성과
+{json.dumps(price_brackets, ensure_ascii=False)}
+
+## 과거 AI 인사이트
+{json.dumps(ai_insights[-5:], ensure_ascii=False)}
+
+## 이번 주 일간 리뷰 요약
+{json.dumps([r.get("performance_summary", "") for r in recent_reviews], ensure_ascii=False)}
+
+## 현재 엔진 설정
+{json.dumps(current_config, ensure_ascii=False, indent=2)}
+
+## 진화 이력
+{json.dumps(evolution_log[-5:], ensure_ascii=False)}
+
+## 요청
+일주일 전략 성과를 심층 분석하고, 근본적인 전략 재설계 방향을 제시하세요.
+
+반드시 아래 JSON 형식으로만 답하세요:
+```json
+{{
+  "weekly_summary": "주간 성과 총평 (3~5문장)",
+  "parameter_changes": {{
+    "파라미터명": 값,
+    ...
+  }},
+  "strategy_overhaul": [
+    "전략 구조 변경 권고 1",
+    "전략 구조 변경 권고 2"
+  ],
+  "best_performing": "가장 성과 좋은 전략/시간대/가격대",
+  "worst_performing": "가장 성과 나쁜 전략/시간대/가격대",
+  "insight": "이번 주에서 배운 핵심 인사이트 (1문장, 영구 기록용)"
+}}
+```
+"""
+
+            response = self.client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = self._parse_json(response.content[0].text)
+
+            review = {
+                "review_type": "weekly",
+                "timestamp": datetime.now().isoformat(),
+                "weekly_summary": result.get("weekly_summary", ""),
+                "parameter_changes": self._validate_params(result.get("parameter_changes", {})),
+                "strategy_overhaul": result.get("strategy_overhaul", []),
+                "best_performing": result.get("best_performing", ""),
+                "worst_performing": result.get("worst_performing", ""),
+                "insight": result.get("insight", ""),
+                "stats_snapshot": {
+                    "weekly_trades": weekly_count,
+                    "weekly_pnl": weekly_pnl,
+                },
+            }
+
+            self.last_review_time = time.time()
+            self.last_review_result = review
+            self._save_review(review)
+
+            logger.info(f"[AIAdvisor] 주간 심층 리뷰 완료: {review['weekly_summary'][:100]}")
+            return review
+
+        except Exception as e:
+            logger.error(f"[AIAdvisor] 주간 리뷰 실패: {e}")
+            return {"error": str(e), "parameter_changes": {}}
+
+    # ════════════════════════════════════════════
+    #  3. 파라미터 자동 적용
+    # ════════════════════════════════════════════
+
+    def apply_review_changes(self, parameter_changes: dict) -> dict:
+        """
+        리뷰 결과의 파라미터 변경을 엔진에 적용
+
+        Returns:
+            {"applied": {...}, "rejected": {...}, "reason": "..."}
+        """
+        if not parameter_changes:
+            return {"applied": {}, "rejected": {}, "reason": "변경 사항 없음"}
+
+        validated = self._validate_params(parameter_changes)
+        rejected = {k: v for k, v in parameter_changes.items() if k not in validated}
+
+        if validated:
+            try:
+                from services.auto_scalper import auto_scalper
+                auto_scalper.update_config(validated)
+                logger.info(f"[AIAdvisor] 리뷰 결과 적용: {validated}")
+            except Exception as e:
+                logger.error(f"[AIAdvisor] 적용 실패: {e}")
+                return {"applied": {}, "rejected": parameter_changes, "reason": str(e)}
+
+        return {
+            "applied": validated,
+            "rejected": rejected,
+            "reason": f"{len(validated)}개 적용, {len(rejected)}개 거부" if rejected else "전체 적용",
+        }
+
+    # ════════════════════════════════════════════
+    #  4. AI 프리셋 최적화
+    # ════════════════════════════════════════════
+
+    def optimize_preset(self, preset_name: str) -> dict:
+        """
+        특정 프리셋의 파라미터를 AI가 분석하여 최적화된 새 버전 생성
+
+        Returns:
+            {"success": bool, "new_preset_name": str, "changes": dict, "reason": str}
+        """
+        if not self.available:
+            return {"success": False, "reason": "Claude API 미사용"}
+
+        try:
+            from services.skill_preset import preset_manager, SkillPreset
+            preset = preset_manager.load_preset(preset_name)
+            if not preset:
+                return {"success": False, "reason": f"프리셋 '{preset_name}'을 찾을 수 없음"}
+
+            perf = preset.performance
+            from services.trade_analyzer import trade_brain
+            brain_data = trade_brain.brain if trade_brain else {}
+
+            prompt = f"""당신은 한국 주식(KRX) 초단타 스캘핑 프리셋 최적화 AI입니다.
+
+## 최적화 대상 프리셋
+- 이름: {preset.display_name} ({preset.name})
+- 설명: {preset.description}
+- 버전: v{preset.version}
+
+## 현재 전략 조합
+{json.dumps(preset.strategies, ensure_ascii=False, indent=2)}
+
+## 리스크 설정
+{json.dumps(preset.risk, ensure_ascii=False, indent=2)}
+
+## 주문 설정
+{json.dumps(preset.order, ensure_ascii=False, indent=2)}
+
+## 종목 필터
+{json.dumps(preset.stock_filter, ensure_ascii=False, indent=2)}
+
+## 성과 데이터
+- 총 거래: {perf.get('total_trades', 0)}회
+- 승률: {perf.get('win_rate', 0)}%
+- 최근 20건 승률: {perf.get('recent_win_rate', 0)}%
+- 순손익: {perf.get('total_net_pnl', 0):+,.0f}원
+- 최근 20건 손익: {json.dumps(perf.get('recent_20_trades', []))}
+
+## 전략별 누적 성과 (Brain 데이터)
+{json.dumps(brain_data.get('strategy_scores', {}), ensure_ascii=False, indent=2)}
+
+## 시간대별 성과
+{json.dumps(brain_data.get('time_scores', {}), ensure_ascii=False)}
+
+## 요청
+이 프리셋의 파라미터를 최적화하세요.
+성과가 나쁜 전략은 비활성화하고, 좋은 전략은 가중치를 높이세요.
+리스크/주문 설정도 성과에 맞게 조정하세요.
+
+반드시 아래 JSON 형식으로만 답하세요:
+```json
+{{
+  "strategies": {{
+    "전략명": {{"enabled": bool, "weight": float, "params": {{...}}}},
+    ...
+  }},
+  "risk": {{"설정키": 값, ...}},
+  "order": {{"설정키": 값, ...}},
+  "stock_filter": {{"설정키": 값, ...}},
+  "reason": "최적화 사유 요약"
+}}
 ```
 
 규칙:
-- 후보 목록에 있는 코드만 선택
-- 과거 성과에서 해당 가격대가 불리하면 제외
-- defensive 모드면 변동성 낮은 종목 우선
-- aggressive 모드면 거래량 많고 추세 강한 종목 우선
+- 최소 2개 전략은 활성화 유지
+- stop_loss_pct: 0.2~2.0, take_profit_pct: 0.3~5.0
+- weight: 0.5~2.0
+- min_consensus: 1~4
+- 데이터 부족한 전략(5건 미만)은 변경하지 마세요
 """
+
             response = self.client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=500,
+                model="claude-sonnet-4-20250514",
+                max_tokens=1500,
                 messages=[{"role": "user", "content": prompt}],
             )
             result = self._parse_json(response.content[0].text)
 
-            if "selected" in result:
-                selected_codes = result["selected"]
-                # 원래 candidates에서 AI가 선택한 순서로 재배열
-                code_map = {c[0]: c for c in candidates}
-                reordered = []
-                for code in selected_codes:
-                    if code in code_map:
-                        reordered.append(code_map[code])
-                # 나머지 추가
-                for c in candidates:
-                    if c[0] not in selected_codes:
-                        reordered.append(c)
+            if not result:
+                return {"success": False, "reason": "AI 응답 파싱 실패"}
 
-                self._log_decision("stock_scan", {
-                    "original": [c[0] for c in candidates[:5]],
-                    "ai_selected": selected_codes,
-                    "reason": result.get("reason", ""),
-                })
-                self._cache.set(cache_key, reordered)
-                logger.info(f"[AIAdvisor] 종목 선정: {selected_codes} ({result.get('reason', '')})")
-                return reordered
-
-        except Exception as e:
-            logger.error(f"[AIAdvisor] 종목 평가 실패: {e}")
-
-        return candidates
-
-    # ════════════════════════════════��═══════════
-    #  2. 진입 판단 개입
-    # ════════════════════════════════════════════
-
-    def should_enter(self, code: str, consensus: dict, tick_data: dict,
-                     current_positions: dict, brain_data: dict) -> dict:
-        """
-        컨센서스 시그널 발생 시 AI가 진입 승인/거부/조건 수정
-
-        Returns:
-            {"approve": True/False, "adjust": {설정 조정}, "reason": "사유"}
-        """
-        if not self.available:
-            return {"approve": True, "adjust": {}, "reason": "AI 미사용"}
-
-        cache_key = f"entry_{code}_{consensus.get('side', '')}"
-        cached = self._cache.get(cache_key)
-        if cached:
-            return cached
-
-        try:
-            strategy_perf = brain_data.get("strategy_scores", {}).get(
-                consensus.get("strategy", ""), {})
-
-            # 호가 정보 구성 (0이면 미제공으로 표시)
-            price = tick_data.get('price', 0)
-            bid = tick_data.get('bid', 0)
-            ask = tick_data.get('ask', 0)
-            if bid > 0 and ask > 0:
-                orderbook_info = f"- 매수호가: {bid:,}원 (잔량 {tick_data.get('bid_qty', 0):,})\n- 매도호가: {ask:,}원 (잔량 {tick_data.get('ask_qty', 0):,})"
-            else:
-                orderbook_info = "- 호가 데이터: 실시간 체결가 기반 (호가창 미제공 - 정상)"
-
-            win_rate = round(strategy_perf.get('wins', 0) / max(strategy_perf.get('trade_count', 1), 1) * 100, 1)
-            recent_pnl = sum(strategy_perf.get('recent_pnls', [])[-10:])
-
-            prompt = f"""당신은 초단타 스캘핑 진입 판단 AI입니다. 적극적으로 매매 기회를 잡아야 합니다.
-
-## 핵심 원칙
-- 스캘핑은 다수의 소액 거래로 수익을 쌓는 전략입니다
-- 거래 횟수가 적으면 수익을 낼 수 없습니다
-- 2개 이상 전략이 합의한 시그널은 신뢰도가 높습니다 → 가급적 승인하세요
-- 거부는 명확한 위험(승률 극히 낮음, 연속 대손실)이 있을 때만 합니다
-
-## 진입 시그널
-- 종목: {code}
-- 방향: {consensus.get('side', '')}
-- 전략: {consensus.get('strategy', '')}
-- 사유: {consensus.get('reason', '')}
-
-## 현재 틱 데이터
-- 현재가: {price:,}원
-{orderbook_info}
-
-## 이 전략의 과거 성과
-- 거래수: {strategy_perf.get('trade_count', 0)}
-- 승률: {win_rate}%
-- 최근10건 손익합: {recent_pnl:+,.0f}원
-
-## 현재 보유 포지션: {len(current_positions)}개
-
-## 안전 규칙 (절대 위반 불가)
-- 미수거래 불가, 신용거래 불가, 계좌 잔고 이내에서만 거래
-
-반드시 아래 JSON만 답하세요:
-```json
-{{
-  "approve": true 또는 false,
-  "adjust": {{
-    "take_profit_pct": 숫자 (0.3~1.0, 스캘핑에 맞게),
-    "stop_loss_pct": 숫자 (0.2~0.5),
-    "max_hold_seconds": 숫자 (60~300)
-  }},
-  "reason": "판단 이유 (간결하게)"
-}}
-```
-
-판단 기준:
-- 승률 20% 미만이고 최근 10건 전부 손실이면 거부
-- 그 외에는 적극 승인 (스캘핑은 횟수가 중요)
-- 승인 시 익절/손절을 상황에 맞게 조정 (스캘핑 적정: 익절 0.3~0.8%, 손절 0.2~0.4%)
-"""
-            response = self.client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=400,
-                messages=[{"role": "user", "content": prompt}],
+            # 새 프리셋 버전 생성
+            new_version = preset.version + 1
+            new_preset = SkillPreset(
+                name=f"{preset_name}_v{new_version}",
+                display_name=f"{preset.display_name} v{new_version}",
+                description=f"AI 최적화 ({result.get('reason', '')})",
+                version=new_version,
+                created_by="ai",
+                strategies=result.get("strategies", preset.strategies),
+                risk=result.get("risk", preset.risk),
+                order=result.get("order", preset.order),
+                stock_filter=result.get("stock_filter", preset.stock_filter),
             )
-            result = self._parse_json(response.content[0].text)
 
-            decision = {
-                "approve": result.get("approve", True),
-                "adjust": result.get("adjust", {}),
+            preset_manager.save_preset(new_preset)
+
+            self._save_review({
+                "review_type": "preset_optimize",
+                "timestamp": datetime.now().isoformat(),
+                "preset_name": preset_name,
+                "new_preset_name": new_preset.name,
                 "reason": result.get("reason", ""),
-            }
-
-            # 포지션별 오버라이드 저장
-            if decision["approve"] and decision["adjust"]:
-                self.position_overrides[code] = {
-                    **decision["adjust"],
-                    "reason": decision["reason"],
-                    "set_at": datetime.now().isoformat(),
-                }
-
-            self._log_decision("entry", {
-                "code": code,
-                "side": consensus.get("side", ""),
-                "strategy": consensus.get("strategy", ""),
-                **decision,
             })
-            self._cache.set(cache_key, decision)
 
-            action = "승인" if decision["approve"] else "거부"
-            logger.info(f"[AIAdvisor] 진입 {action}: {code} {consensus.get('side', '')} - {decision['reason']}")
-            return decision
-
-        except Exception as e:
-            logger.error(f"[AIAdvisor] 진입 판단 실패: {e}")
-            return {"approve": True, "adjust": {}, "reason": f"AI 오류 (기본 승인): {e}"}
-
-    # ════════════════════════════════════════════
-    #  3. 포지션 관리 - 동적 익절/손절 조정
-    # ════════════════════════════════════════════
-
-    def get_position_override(self, code: str) -> dict:
-        """포지션별 AI 조정값 반환"""
-        return self.position_overrides.get(code, {})
-
-    def should_hold_longer(self, code: str, pos_data: dict, tick_data: dict) -> dict:
-        """
-        익절 시점에 도달했을 때 AI가 더 홀딩할지 판단
-
-        Returns:
-            {"hold": True/False, "new_take_profit_pct": float, "reason": str}
-        """
-        if not self.available:
-            return {"hold": False, "reason": "AI 미사용"}
-
-        cache_key = f"hold_{code}_{int(time.time() / 5)}"  # 5초 캐시
-        cached = self._cache.get(cache_key)
-        if cached:
-            return cached
-
-        try:
-            prompt = f"""당신은 초단타 스캘핑 포지션 관리 AI입니다.
-
-## 현재 포지션
-- 종목: {code}
-- 방향: {pos_data.get('side', '')}
-- 진입가: {pos_data.get('entry_price', 0):,}원
-- 현재가: {tick_data.get('price', 0):,}원
-- 현재 수익률: {pos_data.get('pnl_pct', 0):+.2f}%
-- 보유 시간: {pos_data.get('hold_seconds', 0):.0f}초
-- 고점 이후 하락: {pos_data.get('drawdown_from_high', 0):.2f}%
-
-## 호가 상황
-- 매수잔량: {tick_data.get('bid_qty', 0):,}
-- 매도잔량: {tick_data.get('ask_qty', 0):,}
-
-## 시장 모드: {self.market_mode}
-
-수익을 더 끌고 갈 수 있는 상황인지 판단하세요.
-반드시 아래 JSON만 답하세요:
-```json
-{{
-  "hold": true 또는 false,
-  "new_take_profit_pct": 숫자 (���딩 시 새 익절률, 예: 2.5),
-  "new_trailing_stop_pct": 숫자 (선택, 트레일링 조정),
-  "reason": "판단 이유"
-}}
-```
-
-판단 기준:
-- 매수잔량이 매도잔량보다 많으면 → 상승 여력, 홀딩
-- 보유시간이 이미 길면 → 정리
-- 고점에서 하락 추세면 → 정리
-- 수익이 충분하면 → 트레일링 스탑 좁���서 수익 보전하며 홀딩
-"""
-            response = self.client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = self._parse_json(response.content[0].text)
-
-            decision = {
-                "hold": result.get("hold", False),
-                "new_take_profit_pct": result.get("new_take_profit_pct"),
-                "new_trailing_stop_pct": result.get("new_trailing_stop_pct"),
+            logger.info(f"[AIAdvisor] 프리셋 최적화 완료: {preset_name} → {new_preset.name}")
+            return {
+                "success": True,
+                "new_preset_name": new_preset.name,
+                "changes": result,
                 "reason": result.get("reason", ""),
             }
 
-            # 오버라이드 업데이트
-            if decision["hold"]:
-                override = self.position_overrides.get(code, {})
-                if decision.get("new_take_profit_pct"):
-                    override["take_profit_pct"] = decision["new_take_profit_pct"]
-                if decision.get("new_trailing_stop_pct"):
-                    override["trailing_stop_pct"] = decision["new_trailing_stop_pct"]
-                override["reason"] = f"홀��� 연장: {decision['reason']}"
-                self.position_overrides[code] = override
-
-            self._log_decision("hold_check", {"code": code, **decision})
-            self._cache.set(cache_key, decision)
-
-            action = "홀딩 연장" if decision["hold"] else "익절 실행"
-            logger.info(f"[AIAdvisor] {action}: {code} - {decision['reason']}")
-            return decision
-
         except Exception as e:
-            logger.error(f"[AIAdvisor] 홀딩 판단 실패: {e}")
-            return {"hold": False, "reason": f"AI 오류: {e}"}
+            logger.error(f"[AIAdvisor] 프리셋 최적화 실패: {e}")
+            return {"success": False, "reason": str(e)}
 
     # ════════════════════════════════════════════
-    #  4. 시장 상황 분석 (주기적)
+    #  파라미터 검증
     # ════════════════════════════════════════════
 
-    async def analyze_market(self, positions: dict, stats: dict, brain_data: dict):
-        """
-        시장 상황을 분석하여 공격/방어 모드 결정
-        _monitor_loop에서 주기적으로 호출
-        """
-        if not self.available:
-            return
+    _PARAM_RULES = {
+        "stop_loss_pct": (0.2, 2.0, float),
+        "take_profit_pct": (0.3, 5.0, float),
+        "trailing_stop_pct": (0.15, 2.0, float),
+        "max_investment_per_trade": (100_000, 2_000_000, int),
+        "max_position_count": (1, 5, int),
+        "min_consensus": (1, 4, int),
+        "max_hold_seconds": (30, 600, float),
+        "max_daily_loss": (10_000, 200_000, float),
+        "max_daily_trades": (10, 200, int),
+        "tick_momentum_threshold": (0.5, 0.9, float),
+        "vwap_entry_deviation": (0.1, 1.0, float),
+        "imbalance_threshold": (1.5, 5.0, float),
+        "bb_std": (1.5, 3.0, float),
+        "bb_window": (15, 60, int),
+        "rsi_period": (5, 20, int),
+        "rsi_oversold": (15.0, 35.0, float),
+        "rsi_overbought": (65.0, 85.0, float),
+        "volume_spike_mult": (2.0, 5.0, float),
+        "scan_interval_seconds": (30, 300, float),
+        "tick_window": (10, 50, int),
+        "vwap_window": (30, 120, int),
+        "cooldown_seconds": (0.5, 10, float),
+        "rotation_interval_seconds": (120, 1800, float),
+        # 전략 on/off 토글
+        "use_tick_momentum": (None, None, bool),
+        "use_vwap_deviation": (None, None, bool),
+        "use_orderbook_imbalance": (None, None, bool),
+        "use_bollinger_scalp": (None, None, bool),
+        "use_rsi_extreme": (None, None, bool),
+        "use_volume_spike": (None, None, bool),
+        "use_trailing_stop": (None, None, bool),
+    }
 
-        now = time.time()
-        if self.last_market_analysis and now - self.last_market_analysis < self.market_analysis_interval:
-            return
-
-        self.last_market_analysis = now
-
-        try:
-            recent_pnls = []
-            for s in brain_data.get("strategy_scores", {}).values():
-                recent_pnls.extend(s.get("recent_pnls", [])[-5:])
-
-            prompt = f"""당신은 초단타 스캘핑 시장 분석 AI입니다.
-
-## 핵심 원칙
-- 스캘핑은 거래 횟수가 수익의 핵심입니다
-- defensive 모드는 하루 손실이 -30,000원 이상일 때만 사용합니다
-- 평소에는 aggressive 또는 normal을 유지하세요
-
-## 현재 상태
-- 시각: {datetime.now().strftime('%H:%M')}
-- 보유 포지션: {len(positions)}개
-- 오늘 거래: {stats.get('total_trades', 0)}회
-- 오늘 순손익: {stats.get('total_net_pnl', 0):+,.0f}원
-- 승: {stats.get('wins', 0)} / 패: {stats.get('losses', 0)}
-
-## 최근 거래 손익 추이
-{recent_pnls[-20:] if recent_pnls else '데이터 없음'}
-
-반드시 아래 JSON만 답하세요:
-```json
-{{
-  "mode": "aggressive" 또는 "normal" 또는 "defensive",
-  "reason": "판단 이유 (간결하게)",
-  "config_adjust": {{}}
-}}
-```
-
-판단 기준:
-- 거래 횟수가 적으면(10건 미만) → aggressive (거래 활성화 필요)
-- 오늘 손실 -30,000원 이상 → defensive
-- 그 외 → aggressive 또는 normal
-- aggressive에서도 max_investment_per_trade는 2,000,000원 절대 초과 금지
-"""
-            response = self.client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=400,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result = self._parse_json(response.content[0].text)
-
-            new_mode = result.get("mode", "normal")
-            if new_mode in ("aggressive", "normal", "defensive"):
-                old_mode = self.market_mode
-                self.market_mode = new_mode
-
-                if old_mode != new_mode:
-                    logger.info(f"[AIAdvisor] 시장 모드 전환: {old_mode} → {new_mode} ({result.get('reason', '')})")
-
-                # 설정 조정 적용
-                config_adjust = result.get("config_adjust", {})
-                if config_adjust:
-                    self._safe_apply_config(config_adjust)
-
-                self._log_decision("market_analysis", {
-                    "mode": new_mode,
-                    "reason": result.get("reason", ""),
-                    "config_adjust": config_adjust,
-                })
-
-        except Exception as e:
-            logger.error(f"[AIAdvisor] 시장 분석 실패: {e}")
-
-    def _safe_apply_config(self, changes: dict):
-        """안전 규칙을 강제한 후 설정 적용"""
+    def _validate_params(self, changes: dict) -> dict:
+        """안전 규칙을 강제하여 허용 범위 내 값만 반환"""
         safe = {}
         for k, v in changes.items():
-            # 절대 제한
-            if k == "max_investment_per_trade":
-                v = max(100_000, min(2_000_000, int(v)))
-            if k == "stop_loss_pct":
-                v = max(0.2, min(2.0, float(v)))
-            if k == "take_profit_pct":
-                v = max(0.3, min(5.0, float(v)))
-            if k == "max_position_count":
-                v = max(1, min(5, int(v)))
-            if k == "min_consensus":
-                v = max(1, min(4, int(v)))
-            if k == "max_hold_seconds":
-                v = max(30, min(600, float(v)))
-            if k == "max_daily_loss":
-                v = max(10_000, min(200_000, float(v)))
-            if k == "max_daily_trades":
-                v = max(10, min(200, int(v)))
-            safe[k] = v
-
-        if safe:
+            rule = self._PARAM_RULES.get(k)
+            if not rule:
+                continue
+            lo, hi, typ = rule
             try:
-                from services.auto_scalper import auto_scalper
-                auto_scalper.update_config(safe)
-                logger.info(f"[AIAdvisor] 안전 검증 후 설정 적용: {safe}")
-            except Exception as e:
-                logger.error(f"[AIAdvisor] 설정 적용 실패: {e}")
+                v = typ(v)
+                if typ == bool:
+                    safe[k] = v
+                else:
+                    safe[k] = max(lo, min(hi, v))
+            except (ValueError, TypeError):
+                continue
+        return safe
 
-    def on_position_closed(self, code: str):
-        """포지션 청산 시 오버라이드 제거"""
-        self.position_overrides.pop(code, None)
+    # ════════════════════════════════════════════
+    #  리뷰 히스토리 관리
+    # ════════════════════════════════════════════
+
+    def _load_review_history(self) -> list:
+        log_file = Path(__file__).parent.parent.parent / "trading_journals" / "ai_reviews.json"
+        if log_file.exists():
+            try:
+                return json.loads(log_file.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        return []
+
+    def _save_review(self, review: dict):
+        self.review_history.append(review)
+        # 최근 100건만 보관
+        if len(self.review_history) > 100:
+            self.review_history = self.review_history[-100:]
+        try:
+            self._log_file.parent.mkdir(parents=True, exist_ok=True)
+            self._log_file.write_text(
+                json.dumps(self.review_history, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
 
     # ════════════════════════════════════════════
     #  유틸리티
@@ -517,14 +609,12 @@ class AIAdvisor:
 
     def _parse_json(self, text: str) -> dict:
         import re
-        # ```json ... ``` 블록 추출
         blocks = re.findall(r'```json\s*(\{[^`]+\})\s*```', text, re.DOTALL)
         for block in blocks:
             try:
                 return json.loads(block)
             except json.JSONDecodeError:
                 continue
-        # 블록 없으면 전체에서 시도
         try:
             start = text.index("{")
             end = text.rindex("}") + 1
@@ -532,44 +622,18 @@ class AIAdvisor:
         except (ValueError, json.JSONDecodeError):
             return {}
 
-    def _load_decisions(self) -> list:
-        if self._log_file.exists():
-            try:
-                return json.loads(self._log_file.read_text(encoding="utf-8"))
-            except Exception:
-                return []
-        return []
-
-    def _log_decision(self, decision_type: str, data: dict):
-        self._decisions.append({
-            "type": decision_type,
-            "timestamp": datetime.now().isoformat(),
-            **data,
-        })
-        # 최근 500건만 보관
-        if len(self._decisions) > 500:
-            self._decisions = self._decisions[-500:]
-        try:
-            self._log_file.parent.mkdir(parents=True, exist_ok=True)
-            self._log_file.write_text(
-                json.dumps(self._decisions, ensure_ascii=False, indent=2),
-                encoding="utf-8"
-            )
-        except Exception:
-            pass
-
     def get_status(self) -> dict:
         return {
             "available": self.available,
-            "market_mode": self.market_mode,
-            "last_market_analysis": self.last_market_analysis,
-            "position_overrides": self.position_overrides,
-            "recent_decisions": self._decisions[-10:],
-            "total_decisions": len(self._decisions),
+            "mode": "supervisor",
+            "last_review_time": self.last_review_time,
+            "last_review_result": self.last_review_result,
+            "total_reviews": len(self.review_history),
+            "recent_reviews": self.review_history[-5:],
         }
 
-    def get_decisions(self, limit: int = 50) -> list:
-        return self._decisions[-limit:]
+    def get_reviews(self, limit: int = 20) -> list:
+        return self.review_history[-limit:]
 
 
 # 싱글톤

@@ -1,10 +1,18 @@
 """
 Auto Scalping API Router
 완전 자동 스캘핑 시스템 제어 엔드포인트
+
+아키텍처:
+  실시간 매매: 룰 기반 엔진 (지연 없음)
+  AI 리뷰: 1일 1~2회 수동/스케줄 호출 (Claude API)
 """
 from fastapi import APIRouter
 from pydantic import BaseModel
+from typing import Optional
 from services.auto_scalper import auto_scalper
+from services.ai_advisor import ai_advisor
+from services.trade_analyzer import trade_brain
+from services.skill_preset import preset_manager
 import logging
 
 logger = logging.getLogger(__name__)
@@ -158,4 +166,299 @@ async def force_scan():
         "previous": old_targets,
         "current": new_targets,
         "added": added,
+    }
+
+
+# ════════════════════════════════════════════
+#  AI 감독관 엔드포인트 (1일 1~2회 수동/스케줄 호출)
+# ════════════════════════════════════════════
+
+class ReviewApplyRequest(BaseModel):
+    parameter_changes: dict
+
+
+@router.get("/ai-status")
+def get_ai_status():
+    """AI 감독관 상태 조회"""
+    return ai_advisor.get_status()
+
+
+@router.post("/ai-review/daily")
+def run_daily_review():
+    """
+    일간 전략 리뷰 실행 (Claude API 호출)
+    오늘의 거래 성과를 분석하고 파라미터 조정안 제시
+    """
+    if not ai_advisor.available:
+        return {"success": False, "message": "ANTHROPIC_API_KEY가 설정되지 않았습니다."}
+
+    trade_history = [
+        {
+            "code": t.code, "strategy": t.strategy,
+            "net_pnl": t.net_pnl, "pnl_pct": t.pnl_pct,
+            "hold_seconds": t.hold_seconds,
+            "exit_reason": t.exit_reason,
+        }
+        for t in auto_scalper.trade_history
+    ]
+    stats = dict(auto_scalper.stats)
+    brain_data = trade_brain.brain if trade_brain else {}
+    current_config = auto_scalper.config.to_dict()
+
+    result = ai_advisor.daily_strategy_review(
+        trade_history, stats, brain_data, current_config
+    )
+
+    if "error" in result:
+        return {"success": False, "message": result["error"]}
+
+    return {
+        "success": True,
+        "review": result,
+        "message": "일간 리뷰 완료. 파라미터 변경을 적용하려면 /ai-review/apply를 호출하세요.",
+    }
+
+
+@router.post("/ai-review/weekly")
+def run_weekly_review():
+    """
+    주간 심층 리뷰 실행 (Claude API 호출)
+    일주일 전략 트렌드 분석 및 근본적 전략 재설계 검토
+    """
+    if not ai_advisor.available:
+        return {"success": False, "message": "ANTHROPIC_API_KEY가 설정되지 않았습니다."}
+
+    brain_data = trade_brain.brain if trade_brain else {}
+    current_config = auto_scalper.config.to_dict()
+    weekly_trades = [
+        {
+            "code": t.code, "strategy": t.strategy,
+            "net_pnl": t.net_pnl, "pnl_pct": t.pnl_pct,
+            "hold_seconds": t.hold_seconds,
+            "exit_reason": t.exit_reason,
+        }
+        for t in auto_scalper.trade_history
+    ]
+
+    result = ai_advisor.weekly_deep_review(brain_data, current_config, weekly_trades)
+
+    if "error" in result:
+        return {"success": False, "message": result["error"]}
+
+    return {
+        "success": True,
+        "review": result,
+        "message": "주간 심층 리뷰 완료.",
+    }
+
+
+@router.post("/ai-review/apply")
+def apply_review_changes(req: ReviewApplyRequest):
+    """AI 리뷰 결과의 파라미터 변경을 엔진에 적용"""
+    result = ai_advisor.apply_review_changes(req.parameter_changes)
+    return {"success": True, **result}
+
+
+@router.post("/ai-review/apply-latest")
+def apply_latest_review():
+    """가장 최근 리뷰의 파라미터 변경을 엔진에 자동 적용"""
+    if not ai_advisor.last_review_result:
+        return {"success": False, "message": "적용할 리뷰 결과가 없습니다."}
+
+    changes = ai_advisor.last_review_result.get("parameter_changes", {})
+    if not changes:
+        return {"success": True, "message": "변경할 파라미터가 없습니다.", "applied": {}}
+
+    result = ai_advisor.apply_review_changes(changes)
+    return {"success": True, **result}
+
+
+@router.get("/ai-review/history")
+def get_review_history(limit: int = 20):
+    """AI 리뷰 히스토리 조회"""
+    return {"reviews": ai_advisor.get_reviews(limit)}
+
+
+# ════════════════════════════════════════════
+#  프리셋 관리 엔드포인트
+# ════════════════════════════════════════════
+
+class PresetCreateRequest(BaseModel):
+    name: str
+    display_name: str
+    description: str = ""
+    strategies: dict = {}
+    risk: dict = {}
+    order: dict = {}
+    stock_filter: dict = {}
+
+
+class PresetUpdateRequest(BaseModel):
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    strategies: Optional[dict] = None
+    risk: Optional[dict] = None
+    order: Optional[dict] = None
+    stock_filter: Optional[dict] = None
+
+
+@router.get("/presets")
+def list_presets():
+    """프리셋 목록 + 성과"""
+    return {"presets": preset_manager.list_presets()}
+
+
+@router.get("/presets/{name}")
+def get_preset(name: str):
+    """프리셋 상세"""
+    preset = preset_manager.load_preset(name)
+    if not preset:
+        return {"success": False, "message": f"프리셋 '{name}'을 찾을 수 없습니다."}
+    return {"success": True, "preset": preset.to_dict()}
+
+
+@router.post("/presets")
+def create_preset(req: PresetCreateRequest):
+    """새 프리셋 생성"""
+    from services.skill_preset import SkillPreset
+    preset = SkillPreset(
+        name=req.name,
+        display_name=req.display_name,
+        description=req.description,
+        created_by="user",
+        strategies=req.strategies,
+        risk=req.risk,
+        order=req.order,
+        stock_filter=req.stock_filter,
+    )
+    success = preset_manager.save_preset(preset)
+    return {"success": success, "message": "프리셋 생성 완료" if success else "저장 실패"}
+
+
+@router.put("/presets/{name}")
+def update_preset(name: str, req: PresetUpdateRequest):
+    """프리셋 수정"""
+    preset = preset_manager.load_preset(name)
+    if not preset:
+        return {"success": False, "message": f"프리셋 '{name}'을 찾을 수 없습니다."}
+
+    if req.display_name is not None:
+        preset.display_name = req.display_name
+    if req.description is not None:
+        preset.description = req.description
+    if req.strategies is not None:
+        preset.strategies = req.strategies
+    if req.risk is not None:
+        preset.risk = req.risk
+    if req.order is not None:
+        preset.order = req.order
+    if req.stock_filter is not None:
+        preset.stock_filter = req.stock_filter
+
+    preset.version += 1
+    success = preset_manager.save_preset(preset)
+    return {"success": success, "preset": preset.to_dict()}
+
+
+@router.delete("/presets/{name}")
+def delete_preset(name: str):
+    """프리셋 삭제"""
+    success = preset_manager.delete_preset(name)
+    return {"success": success}
+
+
+@router.post("/presets/{name}/activate")
+def activate_preset(name: str):
+    """프리셋 활성화 (런타임 교체)"""
+    success = auto_scalper.switch_preset(name)
+    if success:
+        return {"success": True, "message": f"프리셋 '{name}' 활성화 완료", "active": name}
+    return {"success": False, "message": f"프리셋 '{name}' 활성화 실패"}
+
+
+@router.post("/presets/{name}/clone")
+def clone_preset(name: str):
+    """프리셋 복제"""
+    preset = preset_manager.load_preset(name)
+    if not preset:
+        return {"success": False, "message": f"프리셋 '{name}'을 찾을 수 없습니다."}
+
+    from services.skill_preset import SkillPreset
+    clone = SkillPreset.from_dict(preset.to_dict())
+    clone.name = f"{name}_copy"
+    clone.display_name = f"{preset.display_name} (복사본)"
+    clone.created_by = "user"
+    clone.version = 1
+    clone.performance = {
+        "total_trades": 0, "wins": 0, "losses": 0, "total_net_pnl": 0,
+        "recent_20_trades": [], "win_rate": 0, "recent_win_rate": 0,
+        "last_used": "", "active_since": "",
+    }
+    success = preset_manager.save_preset(clone)
+    return {"success": success, "new_name": clone.name}
+
+
+@router.post("/presets/{name}/optimize")
+def optimize_preset(name: str):
+    """AI 프리셋 최적화"""
+    if not ai_advisor.available:
+        return {"success": False, "message": "ANTHROPIC_API_KEY가 설정되지 않았습니다."}
+    result = ai_advisor.optimize_preset(name)
+    return result
+
+
+@router.get("/presets/auto-switch/status")
+def get_auto_switch_status():
+    """자동 전환 상태"""
+    return {
+        "enabled": preset_manager.auto_switch_enabled,
+        "min_trades": preset_manager.auto_switch_min_trades,
+        "active_preset": preset_manager.get_active().name if preset_manager.get_active() else None,
+        "best_preset": preset_manager.get_best_preset(),
+    }
+
+
+@router.post("/presets/auto-switch/toggle")
+def toggle_auto_switch():
+    """자동 전환 ON/OFF"""
+    preset_manager.auto_switch_enabled = not preset_manager.auto_switch_enabled
+    preset_manager._registry["auto_switch_enabled"] = preset_manager.auto_switch_enabled
+    preset_manager._save_registry()
+    return {"enabled": preset_manager.auto_switch_enabled}
+
+
+@router.post("/reset-all")
+async def reset_all():
+    """전체 리셋: 엔진 정지 + brain + config + 프리셋 전부 초기화"""
+    # 엔진 정지
+    if auto_scalper.running:
+        await auto_scalper.stop()
+
+    # 프리셋 매니저 리셋 (brain.json, config, presets 전부 삭제 후 재생성)
+    preset_manager.reset_all()
+
+    # trade_brain 재초기화
+    try:
+        trade_brain.brain = trade_brain._default_brain()
+        trade_brain._save_brain()
+    except Exception:
+        pass
+
+    # auto_scalper 재초기화
+    auto_scalper.config = auto_scalper.config.__class__()
+    auto_scalper.strategy = auto_scalper.strategy.__class__(auto_scalper.config)
+    auto_scalper.risk = auto_scalper.risk.__class__(auto_scalper.config)
+    auto_scalper.active_preset_name = "aggressive"
+    auto_scalper.stats = {
+        "started_at": None, "total_signals": 0, "total_trades": 0,
+        "wins": 0, "losses": 0,
+        "total_gross_pnl": 0.0, "total_net_pnl": 0.0, "total_commission": 0.0,
+    }
+    auto_scalper.trade_history.clear()
+    auto_scalper.signal_log.clear()
+
+    return {
+        "success": True,
+        "message": "전체 리셋 완료. 5개 기본 프리셋으로 재시작합니다.",
+        "presets": preset_manager.list_presets(),
     }

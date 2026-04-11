@@ -240,6 +240,58 @@ export async function forceAutoScan() {
     return fetchApi('/api/auto-scalping/scan', { method: 'POST' });
 }
 
+// --- AI Supervisor (감독관) ---
+export async function getAIStatus() {
+    return fetchApi('/api/auto-scalping/ai-status');
+}
+export async function runDailyReview() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/ai-review/daily', { method: 'POST' });
+}
+export async function runWeeklyReview() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/ai-review/weekly', { method: 'POST' });
+}
+export async function applyLatestReview() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/ai-review/apply-latest', { method: 'POST' });
+}
+export async function getReviewHistory(limit = 20) {
+    return fetchApi(`/api/auto-scalping/ai-review/history?limit=${limit}`);
+}
+
+// --- Skill Presets (스킬 프리셋) ---
+export async function getPresets() {
+    return fetchApi('/api/auto-scalping/presets');
+}
+export async function getPreset(name) {
+    return fetchApi(`/api/auto-scalping/presets/${name}`);
+}
+export async function activatePreset(name) {
+    _backendDown = false;
+    return fetchApi(`/api/auto-scalping/presets/${name}/activate`, { method: 'POST' });
+}
+export async function clonePreset(name) {
+    _backendDown = false;
+    return fetchApi(`/api/auto-scalping/presets/${name}/clone`, { method: 'POST' });
+}
+export async function deletePresetApi(name) {
+    _backendDown = false;
+    return fetchApi(`/api/auto-scalping/presets/${name}`, { method: 'DELETE' });
+}
+export async function optimizePreset(name) {
+    _backendDown = false;
+    return fetchApi(`/api/auto-scalping/presets/${name}/optimize`, { method: 'POST' });
+}
+export async function toggleAutoSwitch() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/presets/auto-switch/toggle', { method: 'POST' });
+}
+export async function resetAll() {
+    _backendDown = false;
+    return fetchApi('/api/auto-scalping/reset-all', { method: 'POST' });
+}
+
 // --- Health Check ---
 export async function checkBackendHealth() {
     try {

@@ -39,10 +39,12 @@ class TradeBrain:
         self._brain_file = BRAIN_DIR / "brain.json"
         BRAIN_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 진화 설정
-        self.evolve_every_n = 10          # N거래마다 Claude AI 호출
-        self.min_trades_to_evolve = 15    # 최소 데이터
-        self.deep_review_every_n = 50     # N거래마다 심층 리뷰
+        # 진화 설정 (승률 70% 목표, API 비용 절약)
+        self.evolve_every_n = 20          # 20거래마다 Claude AI 호출 (비용 절약)
+        self.min_trades_to_evolve = 20    # 최소 20거래 후 진화 시작
+        self.deep_review_every_n = 50     # 50거래마다 심층 리뷰
+        self.target_win_rate = 70.0       # 목표 승률 70%
+        # 5거래마다는 룰 기반 자동 조정 (API 호출 없음)
 
         # Claude 클라이언트
         self._client = None
@@ -153,7 +155,15 @@ class TradeBrain:
         self.brain["since_last_evolve"] += 1
         self._save_brain()
 
-        # 진화 조건 체크
+        # 5거래마다 룰 기반 미세 조정 (API 호출 없음, 무료)
+        if self.brain["since_last_evolve"] % 5 == 0 and self.brain["total_learned"] >= 10:
+            rule_result = self._rule_based_evolve()
+            rule_changes = rule_result.get("config_changes", {})
+            if rule_changes:
+                self._apply_to_engine(rule_changes)
+                logger.info(f"[Brain] 룰 기반 미세 조정: {rule_changes}")
+
+        # 20거래마다 Claude AI 진화 (API 호출)
         if (self.brain["since_last_evolve"] >= self.evolve_every_n
                 and self.brain["total_learned"] >= self.min_trades_to_evolve):
             self._evolve()
@@ -161,7 +171,7 @@ class TradeBrain:
         remaining = self.evolve_every_n - self.brain["since_last_evolve"]
         logger.info(f"[Brain] 학습 #{self.brain['total_learned']}: "
                      f"{strategy} {'승' if is_win else '패'} {net_pnl:+,.0f}원 "
-                     f"(진화까지 {remaining}거래)")
+                     f"(AI진화까지 {remaining}거래)")
 
     def _learn_strategy(self, name, pnl, hold, is_win):
         scores = self.brain["strategy_scores"]
@@ -296,8 +306,8 @@ class TradeBrain:
             prompt = self._build_evolution_prompt(current_config, is_deep)
 
             response = self.client.messages.create(
-                model="claude-opus-4-20250514",
-                max_tokens=3000,
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
             ai_text = response.content[0].text
@@ -452,7 +462,7 @@ class TradeBrain:
     # ════════════════════════════════════════════
 
     def _rule_based_evolve(self) -> dict:
-        """Claude 없이 통계 규칙으로 진화 (폴백)"""
+        """Claude 없이 통계 규칙으로 진화 (승률 70% 목표 세밀 학습)"""
         changes = {}
         reasons = []
 
@@ -461,21 +471,27 @@ class TradeBrain:
             "vwap_deviation": "use_vwap_deviation",
             "orderbook_imbalance": "use_orderbook_imbalance",
             "bollinger_scalp": "use_bollinger_scalp",
-            "ema_crossover": "use_ema_cross",
-            "stochastic": "use_stochastic",
-            "macd": "use_macd",
-            "alma": "use_alma",
-            "execution_strength": "use_execution_strength",
+            "ema_crossover": "use_ema_crossover",
             "rsi_extreme": "use_rsi_extreme",
             "volume_spike": "use_volume_spike",
+            "trade_intensity": "use_trade_intensity",
+            "tick_acceleration": "use_tick_acceleration",
         }
 
+        # 1. 전략별 성과 분석 → 비활성화/활성화
+        best_strategy = None
+        best_win_rate = 0
         for name, s in self.brain["strategy_scores"].items():
-            if s["trade_count"] < 5:
+            if s["trade_count"] < 3:
                 continue
             win_rate = s["wins"] / s["trade_count"]
             recent = s["recent_pnls"][-10:]
             recent_pnl = sum(recent)
+
+            # 최고 승률 전략 추적
+            if win_rate > best_win_rate:
+                best_win_rate = win_rate
+                best_strategy = name
 
             config_key = None
             for pattern, key in strategy_to_config.items():
@@ -485,20 +501,74 @@ class TradeBrain:
             if not config_key:
                 continue
 
-            if recent_pnl < 0 and win_rate < 0.40:
+            # 승률 30% 미만 + 최근 손실 → 비활성화
+            if recent_pnl < 0 and win_rate < 0.30:
                 changes[config_key] = False
-                reasons.append(f"[규칙] {name} 비활성화: 승률{win_rate*100:.0f}% 최근{recent_pnl:+,.0f}원")
+                reasons.append(f"[전략] {name} 비활성화: 승률{win_rate*100:.0f}%")
+            # 승률 70% 이상 + 비활성 상태면 활성화 권고
+            elif win_rate >= 0.70 and s["trade_count"] >= 5:
+                changes[config_key] = True
+                reasons.append(f"[전략] {name} 유지/활성화: 승률{win_rate*100:.0f}%")
 
-        # 손절 빈도 분석
+        # 2. 손절/익절 비율 분석 → 세밀 조정
         exit_p = self.brain["exit_patterns"]
-        sl = exit_p.get("손절", exit_p.get("stop_loss", {}))
-        tp = exit_p.get("익절", exit_p.get("take_profit", {}))
-        if sl and tp:
-            total = sl.get("count", 0) + tp.get("count", 0)
-            if total >= 5 and sl["count"] / total > 0.70:
-                current = self._get_config_val("stop_loss_pct", 0.5)
-                changes["stop_loss_pct"] = round(min(1.5, current * 1.15), 3)
-                reasons.append(f"[규칙] 손절비율 {sl['count']}/{total} → 손절폭 15% 확대")
+        sl_count = 0
+        tp_count = 0
+        trail_count = 0
+        timeout_count = 0
+        for reason_key, data in exit_p.items():
+            rk = reason_key.lower()
+            count = data.get("count", 0)
+            if "손절" in rk or "stop" in rk:
+                sl_count += count
+            elif "익절" in rk or "take" in rk or "profit" in rk:
+                tp_count += count
+            elif "트레일링" in rk or "trailing" in rk:
+                trail_count += count
+            elif "시간" in rk or "timeout" in rk:
+                timeout_count += count
+
+        total_exits = sl_count + tp_count + trail_count + timeout_count
+        if total_exits >= 5:
+            sl_ratio = sl_count / total_exits
+
+            # 손절 비율 60% 이상 → 손절폭 확대 (너무 빨리 손절)
+            if sl_ratio > 0.60:
+                current_sl = self._get_config_val("stop_loss_pct", 0.5)
+                new_sl = round(min(1.5, current_sl * 1.1), 2)
+                changes["stop_loss_pct"] = new_sl
+                reasons.append(f"[손절] 손절비율 {sl_ratio:.0%} → 손절폭 {current_sl}→{new_sl}%")
+
+            # 시간초과 비율 40% 이상 → 보유시간 확대
+            if timeout_count / total_exits > 0.40:
+                current_hold = self._get_config_val("max_hold_seconds", 300)
+                new_hold = min(600, current_hold * 1.2)
+                changes["max_hold_seconds"] = round(new_hold)
+                reasons.append(f"[시간] 시간초과 {timeout_count}/{total_exits} → 보유시간 확대")
+
+            # 익절+트레일링 비율이 높으면 → 익절 기준 약간 상향 (수익 극대화)
+            if (tp_count + trail_count) / total_exits > 0.50:
+                current_tp = self._get_config_val("take_profit_pct", 1.5)
+                new_tp = round(min(3.0, current_tp * 1.05), 2)
+                if new_tp != current_tp:
+                    changes["take_profit_pct"] = new_tp
+                    reasons.append(f"[익절] 익절비율 양호 → 익절 기준 소폭 상향 {new_tp}%")
+
+        # 3. 전체 승률 체크 → 컨센서스 조정
+        total_trades = self.brain["total_learned"]
+        total_wins = sum(s.get("wins", 0) for s in self.brain["strategy_scores"].values())
+        if total_trades >= 10:
+            overall_win_rate = total_wins / total_trades
+            current_consensus = self._get_config_val("min_consensus", 2)
+
+            # 승률 50% 미만 → 컨센서스 상향 (보수적)
+            if overall_win_rate < 0.50 and current_consensus < 3:
+                changes["min_consensus"] = current_consensus + 1
+                reasons.append(f"[컨센서스] 승률 {overall_win_rate:.0%} → 합의 {current_consensus+1}개 필요")
+            # 승률 70% 이상 → 컨센서스 유지 또는 하향 (적극적)
+            elif overall_win_rate >= 0.70 and current_consensus > 2:
+                changes["min_consensus"] = current_consensus - 1
+                reasons.append(f"[컨센서스] 승률 {overall_win_rate:.0%} → 합의 {current_consensus-1}개로 완화")
 
         return {"config_changes": changes, "reasons": reasons, "insight": "규칙 기반 진화 (AI 미사용)"}
 

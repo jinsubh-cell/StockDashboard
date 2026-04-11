@@ -1,0 +1,88 @@
+{
+  "active_preset": "aggressive",
+  "auto_switch_enabled": true,
+  "auto_switch_min_trades": 20,
+  "presets": {
+    "aggressive": {
+      "file": "aggressive.json",
+      "display_name": "공격형 스캘핑",
+      "version": 1
+    },
+    "stable": {
+      "file": "stable.json",
+      "display_name": "안정형 스캘핑",
+      "version": 1
+    },
+    "trend_follow": {
+      "file": "trend_follow.json",
+      "display_name": "추세추종 스캘핑",
+      "version": 1
+    },
+    "counter_trend": {
+      "file": "counter_trend.json",
+      "display_name": "역추세 스캘핑",
+      "version": 1
+    },
+    "volume_burst": {
+      "file": "volume_burst.json",
+      "display_name": "거래량급등 스캘핑",
+      "version": 1
+    }
+  },
+  "switch_history": [
+    {
+      "from": "aggressive",
+      "to": "stable",
+      "timestamp": "2026-04-11T13:30:05.537420",
+      "reason": "manual"
+    },
+    {
+      "from": "stable",
+      "to": "aggressive",
+      "timestamp": "2026-04-11T13:30:17.696861",
+      "reason": "manual"
+    },
+    {
+      "from": "aggressive",
+      "to": "stable",
+      "timestamp": "2026-04-11T13:32:20.828637",
+      "reason": "manual"
+    },
+    {
+      "from": "stable",
+      "to": "aggressive",
+      "timestamp": "2026-04-11T13:32:35.298642",
+      "reason": "manual"
+    },
+    {
+      "from": "aggressive",
+      "to": "stable",
+      "timestamp": "2026-04-11T13:34:57.221816",
+      "reason": "manual"
+    },
+    {
+      "from": "stable",
+      "to": "trend_follow",
+      "timestamp": "2026-04-11T13:34:58.973097",
+      "reason": "manual"
+    },
+    {
+      "from": "trend_follow",
+      "to": "counter_trend",
+      "timestamp": "2026-04-11T13:35:00.951033",
+      "reason": "manual"
+    },
+    {
+      "from": "counter_trend",
+      "to": "volume_burst",
+      "timestamp": "2026-04-11T13:35:02.184541",
+      "reason": "manual"
+    },
+    {
+      "from": "volume_burst",
+      "to": "aggressive",
+      "timestamp": "2026-04-11T13:35:04.302452",
+      "reason": "manual"
+    }
+  ]
+}

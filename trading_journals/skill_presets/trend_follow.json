@@ -1,0 +1,122 @@
+{
+  "name": "trend_follow",
+  "display_name": "추세추종 스캘핑",
+  "description": "EMA 크로스 + 모멘텀으로 추세 포착, 트레일링 스탑으로 수익 극대화.",
+  "version": 1,
+  "created_at": "2026-04-11T13:02:23.239270",
+  "updated_at": "2026-04-11T13:34:58.973748",
+  "created_by": "system",
+  "strategies": {
+    "tick_momentum": {
+      "enabled": true,
+      "weight": 1.0,
+      "params": {
+        "window": 20,
+        "threshold": 0.7
+      }
+    },
+    "volume_spike": {
+      "enabled": true,
+      "weight": 0.8,
+      "params": {
+        "spike_mult": 2.5
+      }
+    },
+    "orderbook_imbalance": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "threshold": 2.0
+      }
+    },
+    "vwap_deviation": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "window": 60,
+        "entry_deviation": 0.3
+      }
+    },
+    "bollinger_scalp": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "window": 30,
+        "std": 2.0
+      }
+    },
+    "rsi_extreme": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "period": 10,
+        "oversold": 25.0,
+        "overbought": 75.0
+      }
+    },
+    "ema_crossover": {
+      "enabled": true,
+      "weight": 1.2,
+      "params": {
+        "fast_period": 9,
+        "slow_period": 21
+      }
+    },
+    "trade_intensity": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "window": 30,
+        "buy_threshold": 2.0,
+        "sell_threshold": 0.5
+      }
+    },
+    "tick_acceleration": {
+      "enabled": false,
+      "weight": 1.0,
+      "params": {
+        "window": 20,
+        "threshold": 0.05
+      }
+    }
+  },
+  "risk": {
+    "stop_loss_pct": 0.5,
+    "take_profit_pct": 2.0,
+    "trailing_stop_pct": 0.5,
+    "use_trailing_stop": true,
+    "max_position_count": 2,
+    "max_daily_loss": 50000,
+    "max_hold_seconds": 300,
+    "cooldown_seconds": 3,
+    "max_daily_trades": 50,
+    "max_investment_per_trade": 700000
+  },
+  "order": {
+    "quantity": 10,
+    "price_type": "market",
+    "min_consensus": 2
+  },
+  "stock_filter": {
+    "min_price": 5000,
+    "max_price": 80000,
+    "min_volume": 500000,
+    "min_volatility_pct": 1.5,
+    "max_volatility_pct": 5.0,
+    "min_trade_value": 8000000000,
+    "min_tick_frequency": 10,
+    "max_spread_pct": 0.25,
+    "max_target_stocks": 5
+  },
+  "performance": {
+    "total_trades": 0,
+    "wins": 0,
+    "losses": 0,
+    "total_net_pnl": 0,
+    "recent_20_trades": [],
+    "win_rate": 0.0,
+    "recent_win_rate": 0.0,
+    "last_used": "2026-04-11T13:34:58.973095",
+    "active_since": "2026-04-11T13:34:58.973088"
+  }
+}

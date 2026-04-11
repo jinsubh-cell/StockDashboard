@@ -9,6 +9,9 @@ import {
     searchStocksApi as apiSearchStocks,
     getAutoScalpingStatus, startAutoScalping, stopAutoScalping,
     getAutoScalpingConfig, updateAutoScalpingConfig, forceAutoScan,
+    getAIStatus, runDailyReview, runWeeklyReview, applyLatestReview, getReviewHistory,
+    getPresets, activatePreset, clonePreset, deletePresetApi, optimizePreset,
+    toggleAutoSwitch, resetAll,
 } from './quantApi.js';
 import { formatPrice, getStockByCode } from './data.js';
 
@@ -140,6 +143,106 @@ export function renderScalpingPage() {
         </div>
       </div>
 
+      <!-- 스킬 프리셋 패널 -->
+      <div class="card" style="grid-column: 1 / -1;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+          <span style="font-size:1.3rem;">&#x1F3AF;</span>
+          <h3 style="font-size:1rem; font-weight:700;">스킬 프리셋</h3>
+          <span style="font-size:0.8rem; color:var(--text-secondary);">매매 스킬 세트 관리 &amp; 승률 기반 자동 전환</span>
+          <label style="margin-left:auto; display:flex; align-items:center; gap:6px; font-size:0.8rem; cursor:pointer;">
+            <input type="checkbox" id="auto-switch-toggle" />
+            자동 전환
+          </label>
+          <button id="reset-all-btn" class="btn" style="padding:6px 14px; font-size:0.75rem; background:#ef4444; color:#fff; border:none; border-radius:6px; cursor:pointer;">
+            전체 초기화
+          </button>
+        </div>
+        <div id="preset-list" style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:16px;">
+          <span style="color:var(--text-secondary); font-size:0.85rem;">프리셋 로딩 중...</span>
+        </div>
+      </div>
+
+      <!-- 프리셋 매매 설정 (익절/손절 사용자 설정) -->
+      <div class="card" style="grid-column: 1 / -1;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+          <span style="font-size:1.2rem;">&#x2699;&#xFE0F;</span>
+          <h3 style="font-size:1rem; font-weight:700;">매매 설정</h3>
+          <span id="preset-config-name" style="font-size:0.8rem; color:#6c5ce7; font-weight:600;"></span>
+          <button id="scalp-save-config" class="btn btn-primary" style="margin-left:auto; font-size:0.8rem; padding:6px 18px;">설정 저장</button>
+        </div>
+        <div style="background:#fff3cd; border:1px solid #ffc107; border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:0.78rem; color:#856404;">
+          &#x26A0; 왕복 수수료 약 0.21% (매수 0.015% + 매도 0.015% + 거래세 0.18%) | 익절은 반드시 0.3% 이상, 손절은 수수료 감안 필요
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:16px;">
+          <!-- 활성 전략 표시 (읽기 전용) -->
+          <div class="config-section">
+            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:var(--accent-primary);">활성 전략 (프리셋 기반)</h4>
+            <div id="preset-active-strategies" style="font-size:0.85rem; line-height:1.8;">
+              <span style="color:var(--text-secondary);">프리셋 로딩 중...</span>
+            </div>
+          </div>
+          <!-- 익절/손절 사용자 설정 -->
+          <div class="config-section">
+            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:#e74c3c;">익절 / 손절 설정</h4>
+            <label class="config-field">익절(%) <input type="number" id="cfg-take-profit" class="ta-select" value="1.5" step="0.1" min="0.3" max="5.0" style="width:80px;" /></label>
+            <label class="config-field">손절(%) <input type="number" id="cfg-stop-loss" class="ta-select" value="0.5" step="0.1" min="0.2" max="2.0" style="width:80px;" /></label>
+            <label class="config-field">트레일링 스탑(%) <input type="number" id="cfg-trailing-stop" class="ta-select" value="0.5" step="0.1" min="0.1" style="width:80px;" /></label>
+            <label class="config-toggle" style="margin-top:6px;"><input type="checkbox" id="cfg-use-trailing" /> 트레일링 스탑 사용</label>
+          </div>
+          <!-- 리스크 관리 -->
+          <div class="config-section">
+            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:#3498db;">리스크 관리</h4>
+            <label class="config-field">최대보유(초) <input type="number" id="cfg-max-hold" class="ta-select" value="300" step="30" style="width:80px;" /></label>
+            <label class="config-field">최대포지션 <input type="number" id="cfg-max-pos" class="ta-select" value="3" min="1" max="5" style="width:80px;" /></label>
+            <label class="config-field">일일손실한도 <input type="number" id="cfg-max-loss" class="ta-select" value="50000" step="10000" style="width:100px;" /></label>
+            <label class="config-field">1회 투자금 <input type="number" id="cfg-max-invest" class="ta-select" value="500000" step="100000" style="width:110px;" /></label>
+          </div>
+          <!-- 주문 설정 -->
+          <div class="config-section">
+            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:var(--accent-primary);">주문 설정</h4>
+            <label class="config-field">주문수량 <input type="number" id="cfg-quantity" class="ta-select" value="10" min="1" style="width:80px;" /></label>
+            <label class="config-field">쿨다운(초) <input type="number" id="cfg-cooldown" class="ta-select" value="3" step="1" style="width:80px;" /></label>
+            <label class="config-field">일일거래한도 <input type="number" id="cfg-max-trades" class="ta-select" value="50" min="10" style="width:80px;" /></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- AI 감독관 패널 -->
+      <div class="card" style="grid-column: 1 / -1;">
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+          <span style="font-size:1.3rem;">&#x1F9E0;</span>
+          <h3 style="font-size:1rem; font-weight:700;">AI 감독관</h3>
+          <span style="font-size:0.8rem; color:var(--text-secondary);">Claude AI: 전략 리뷰 &amp; 프리셋 최적화</span>
+          <span id="ai-status-badge" style="margin-left:auto; padding:4px 14px; border-radius:20px; font-size:0.75rem; font-weight:600; background:var(--bg-tertiary); color:var(--text-secondary);">API 미연결</span>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap;">
+          <button id="ai-daily-review-btn" class="btn btn-outline" style="padding:8px 20px; font-size:0.85rem;">
+            &#x1F4CA; 일간 리뷰
+          </button>
+          <button id="ai-weekly-review-btn" class="btn btn-outline" style="padding:8px 20px; font-size:0.85rem;">
+            &#x1F4C8; 주간 리뷰
+          </button>
+          <button id="ai-optimize-btn" class="btn btn-outline" style="padding:8px 20px; font-size:0.85rem;">
+            &#x2728; 현재 프리셋 AI 최적화
+          </button>
+          <button id="ai-apply-btn" class="btn btn-primary" style="padding:8px 20px; font-size:0.85rem;" disabled>
+            &#x2705; 리뷰 적용
+          </button>
+        </div>
+        <div id="ai-review-result" style="background:var(--bg-secondary); border-radius:10px; padding:16px; font-size:0.85rem; display:none;">
+          <div id="ai-review-content"></div>
+        </div>
+        <div style="margin-top:12px;">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            <span style="font-size:0.95rem;">&#x1F4DD;</span>
+            <span style="font-weight:600; font-size:0.9rem;">리뷰 히스토리</span>
+          </div>
+          <div id="ai-review-history" style="max-height:150px; overflow-y:auto; font-size:0.8rem; font-family:monospace; background:var(--bg-secondary); border-radius:8px; padding:8px;">
+            <span style="color:var(--text-secondary);">리뷰 기록 없음</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Stock Picker - AI 종목 선정 -->
       <div class="card" style="grid-column: 1 / -1;">
         <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
@@ -240,68 +343,6 @@ export function renderScalpingPage() {
         </div>
       </div>
 
-      <!-- Strategy Config -->
-      <div class="card" style="grid-column: 1 / -1;">
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
-          <span style="font-size:1.2rem;">&#x2699;&#xFE0F;</span>
-          <h3 style="font-size:1rem; font-weight:700;">전략 설정</h3>
-          <div style="margin-left:auto; display:flex; align-items:center; gap:10px;">
-            <label style="font-size:0.85rem; font-weight:600; color:var(--text-secondary);">프리셋</label>
-            <select id="cfg-preset" class="ta-select" style="width:160px; font-weight:600; padding:6px 12px;">
-              <option value="default">기본</option>
-              <option value="gemini">제미나이추천</option>
-            </select>
-            <button id="scalp-save-config" class="btn btn-outline" style="font-size:0.8rem; padding:4px 14px;">저장</button>
-          </div>
-        </div>
-        <div style="display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap:16px;">
-          <!-- Strategy Toggles -->
-          <div class="config-section">
-            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:var(--accent-primary);">전략 ON/OFF</h4>
-            <label class="config-toggle"><input type="checkbox" id="cfg-tick-momentum" checked /> 틱 모멘텀</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-vwap" checked /> VWAP 이탈</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-orderbook" checked /> 호가 불균형</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-bollinger" checked /> 볼린저 스캘핑</label>
-            <h4 style="font-size:0.85rem; font-weight:600; margin:12px 0 8px; color:#e17055;">제미나이 전략</h4>
-            <label class="config-toggle"><input type="checkbox" id="cfg-ema-cross" /> EMA 크로스(9/21)</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-stochastic" /> 스토캐스틱(5,3,3)</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-macd" /> MACD(8,21,5)</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-alma" /> ALMA(21)</label>
-            <label class="config-toggle"><input type="checkbox" id="cfg-exec-strength" /> 체결강도 필터</label>
-          </div>
-          <!-- Order Settings -->
-          <div class="config-section">
-            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:var(--accent-primary);">주문 설정</h4>
-            <label class="config-field">주문수량 <input type="number" id="cfg-quantity" class="ta-select" value="10" min="1" style="width:80px;" /></label>
-            <label class="config-field">주문유형
-              <select id="cfg-price-type" class="ta-select" style="width:100px;">
-                <option value="market">시장가</option>
-                <option value="limit">지정가</option>
-              </select>
-            </label>
-          </div>
-          <!-- Risk Settings -->
-          <div class="config-section">
-            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:#ef4444;">리스크 관리</h4>
-            <label class="config-field">손절(%) <input type="number" id="cfg-stop-loss" class="ta-select" value="0.5" step="0.1" min="0.3" style="width:80px;" /></label>
-            <label class="config-field">익절(%) <input type="number" id="cfg-take-profit" class="ta-select" value="1.5" step="0.1" min="0.5" style="width:80px;" /></label>
-            <label class="config-field">최대포지션 <input type="number" id="cfg-max-pos" class="ta-select" value="3" min="1" max="10" style="width:80px;" /></label>
-            <label class="config-field">일일손실한도 <input type="number" id="cfg-max-loss" class="ta-select" value="100000" step="10000" style="width:100px;" /></label>
-            <label class="config-field">최대보유(초) <input type="number" id="cfg-max-hold" class="ta-select" value="300" step="30" style="width:80px;" /></label>
-            <label class="config-field">쿨다운(초) <input type="number" id="cfg-cooldown" class="ta-select" value="5" step="1" style="width:80px;" /></label>
-          </div>
-          <!-- Strategy Params -->
-          <div class="config-section">
-            <h4 style="font-size:0.9rem; font-weight:600; margin-bottom:10px; color:var(--accent-secondary);">전략 파라미터</h4>
-            <label class="config-field">틱윈도우 <input type="number" id="cfg-tick-window" class="ta-select" value="20" min="5" style="width:80px;" /></label>
-            <label class="config-field">모멘텀 임계값 <input type="number" id="cfg-momentum-threshold" class="ta-select" value="0.7" step="0.05" style="width:80px;" /></label>
-            <label class="config-field">VWAP 이탈(%) <input type="number" id="cfg-vwap-dev" class="ta-select" value="0.3" step="0.05" style="width:80px;" /></label>
-            <label class="config-field">호가비율 임계 <input type="number" id="cfg-imbalance" class="ta-select" value="2.0" step="0.5" style="width:80px;" /></label>
-            <label class="config-field">BB윈도우 <input type="number" id="cfg-bb-window" class="ta-select" value="30" min="10" style="width:80px;" /></label>
-            <label class="config-field">BB 표준편차 <input type="number" id="cfg-bb-std" class="ta-select" value="2.0" step="0.5" style="width:80px;" /></label>
-          </div>
-        </div>
-      </div>
     </div>`;
 
     initScalpingEvents();
@@ -360,12 +401,6 @@ function initScalpingEvents() {
             btn.disabled = false;
             btn.innerHTML = '&#x25A0; 정지';
         }
-    });
-
-    // Preset selector
-    document.getElementById('cfg-preset').addEventListener('change', (e) => {
-        const presetKey = e.target.value;
-        applyPreset(presetKey);
     });
 
     // Save config
@@ -458,6 +493,281 @@ function initScalpingEvents() {
             btn.innerHTML = '&#x1F504; 종목 재검색';
         }
     });
+
+    // ═══ AI 감독관 이벤트 ═══
+    document.getElementById('ai-daily-review-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('ai-daily-review-btn');
+        btn.disabled = true;
+        btn.textContent = 'Claude 분석 중...';
+        try {
+            const result = await runDailyReview();
+            if (result.success) {
+                displayReviewResult(result.review);
+                document.getElementById('ai-apply-btn').disabled = false;
+            } else {
+                alert('리뷰 실패: ' + (result.message || ''));
+            }
+        } catch (err) {
+            alert('리뷰 오류: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '&#x1F4CA; 일간 리뷰 실행';
+        }
+    });
+
+    document.getElementById('ai-weekly-review-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('ai-weekly-review-btn');
+        btn.disabled = true;
+        btn.textContent = 'Claude 심층 분석 중...';
+        try {
+            const result = await runWeeklyReview();
+            if (result.success) {
+                displayReviewResult(result.review);
+                document.getElementById('ai-apply-btn').disabled = false;
+            } else {
+                alert('리뷰 실패: ' + (result.message || ''));
+            }
+        } catch (err) {
+            alert('리뷰 오류: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '&#x1F4C8; 주간 심층 리뷰';
+        }
+    });
+
+    document.getElementById('ai-apply-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('ai-apply-btn');
+        btn.disabled = true;
+        try {
+            const result = await applyLatestReview();
+            if (result.success) {
+                const applied = result.applied || {};
+                const count = Object.keys(applied).length;
+                alert(`${count}개 파라미터 적용 완료:\n${JSON.stringify(applied, null, 2)}`);
+            } else {
+                alert('적용 실패: ' + (result.message || ''));
+            }
+        } catch (err) {
+            alert('적용 오류: ' + err.message);
+        } finally {
+            btn.disabled = false;
+            btn.innerHTML = '&#x2705; 최근 리뷰 적용';
+        }
+    });
+
+    // ═══ 프리셋 이벤트 ═══
+    document.getElementById('auto-switch-toggle').addEventListener('change', async () => {
+        try { await toggleAutoSwitch(); } catch (e) { console.warn(e); }
+    });
+
+    document.getElementById('reset-all-btn').addEventListener('click', async () => {
+        if (!confirm('정말 전체 초기화하시겠습니까?\n\n모든 거래 기록, AI 학습 데이터, 프리셋 성과가 삭제됩니다.\n5개 기본 프리셋으로 다시 시작합니다.')) return;
+        try {
+            const result = await resetAll();
+            if (result.success) {
+                alert('전체 초기화 완료!\n' + result.message);
+                loadPresets();
+            } else {
+                alert('초기화 실패: ' + (result.message || ''));
+            }
+        } catch (e) { alert('초기화 오류: ' + e.message); }
+    });
+
+    // AI 최적화 버튼
+    document.getElementById('ai-optimize-btn').addEventListener('click', async () => {
+        const btn = document.getElementById('ai-optimize-btn');
+        btn.disabled = true;
+        btn.textContent = 'AI 최적화 중...';
+        try {
+            const status = await getAutoScalpingStatus();
+            const presetName = status.active_preset || 'aggressive';
+            const result = await optimizePreset(presetName);
+            if (result.success) {
+                alert(`프리셋 최적화 완료!\n새 프리셋: ${result.new_preset_name}\n사유: ${result.reason}`);
+                loadPresets();
+            } else {
+                alert('최적화 실패: ' + (result.reason || result.message || ''));
+            }
+        } catch (e) { alert('최적화 오류: ' + e.message); }
+        finally { btn.disabled = false; btn.innerHTML = '&#x2728; 현재 프리셋 AI 최적화'; }
+    });
+
+    // AI 상태 & 프리셋 & 히스토리 초기 로드
+    loadAIStatus();
+    loadPresets();
+}
+
+// 전략명 한글 매핑
+const STRATEGY_KR = {
+    tick_momentum: '틱 모멘텀',
+    vwap_deviation: 'VWAP 이탈',
+    orderbook_imbalance: '호가 불균형',
+    bollinger_scalp: '볼린저 스캘핑',
+    rsi_extreme: 'RSI 과매수/과매도',
+    volume_spike: '거래량 급증',
+    ema_crossover: 'EMA 크로스',
+    trade_intensity: '체결강도',
+    tick_acceleration: '틱 가속도',
+};
+function strategyKr(name) { return STRATEGY_KR[name] || name; }
+
+// 한국식 색상: 수익=빨강, 손실=파랑
+function pnlColor(val) { return val > 0 ? '#e74c3c' : val < 0 ? '#3498db' : 'var(--text-secondary)'; }
+function pnlSign(val) { return val > 0 ? '+' : ''; }
+
+async function loadPresets() {
+    try {
+        const data = await getPresets();
+        const presets = data.presets || [];
+        const container = document.getElementById('preset-list');
+
+        if (presets.length === 0) {
+            container.innerHTML = '<span style="color:var(--text-secondary);">프리셋 없음</span>';
+            return;
+        }
+
+        container.innerHTML = presets.map(p => {
+            const isActive = p.is_active;
+            const bgColor = isActive ? 'linear-gradient(135deg, #6c5ce720, #a29bfe40)' : 'var(--bg-secondary)';
+            const borderColor = isActive ? '#a29bfe' : 'var(--border-color)';
+            const winColor = p.recent_win_rate >= 50 ? '#e74c3c' : p.recent_win_rate >= 30 ? '#fdcb6e' : '#3498db';
+            const strategiesKr = p.strategies.map(s => strategyKr(s)).join(', ');
+
+            return `
+            <div style="background:${bgColor}; border:1px solid ${borderColor}; border-radius:10px; padding:14px 16px; min-width:200px; flex:1; max-width:260px; text-align:center;">
+                <div style="display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:8px;">
+                    ${isActive ? '<span style="font-size:0.7rem; background:#6c5ce7; color:#fff; padding:2px 8px; border-radius:10px;">활성</span>' : ''}
+                    <span style="font-weight:700; font-size:0.95rem;">${p.display_name}</span>
+                </div>
+                <div style="font-size:0.75rem; color:var(--text-secondary); margin-bottom:10px;">${strategiesKr}</div>
+                <div style="display:flex; justify-content:center; gap:14px; font-size:0.8rem; margin-bottom:10px;">
+                    <span>거래 <b>${p.total_trades}</b></span>
+                    <span style="color:${winColor};">승률 <b>${p.recent_win_rate || 0}%</b></span>
+                    <span style="color:${pnlColor(p.total_net_pnl)};">손익 <b>${pnlSign(p.total_net_pnl)}${Math.round(p.total_net_pnl).toLocaleString()}</b></span>
+                </div>
+                <div style="display:flex; justify-content:center; gap:6px;">
+                    ${!isActive ? `<button class="btn btn-primary preset-activate-btn" data-name="${p.name}" style="padding:4px 12px; font-size:0.75rem;">활성화</button>` : ''}
+                    <button class="btn btn-outline preset-clone-btn" data-name="${p.name}" style="padding:4px 10px; font-size:0.7rem;">복제</button>
+                    ${!isActive && p.created_by !== 'system' ? `<button class="btn preset-delete-btn" data-name="${p.name}" style="padding:4px 10px; font-size:0.7rem; color:#3498db; border:1px solid #3498db; background:transparent; border-radius:6px; cursor:pointer;">삭제</button>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+
+        // 이벤트 바인딩
+        container.querySelectorAll('.preset-activate-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const name = btn.dataset.name;
+                btn.disabled = true;
+                try {
+                    const result = await activatePreset(name);
+                    if (result.success) { loadPresets(); loadConfig(); }
+                    else alert('활성화 실패: ' + result.message);
+                } catch (e) { alert(e.message); }
+                finally { btn.disabled = false; }
+            });
+        });
+        container.querySelectorAll('.preset-clone-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                try {
+                    const result = await clonePreset(btn.dataset.name);
+                    if (result.success) loadPresets();
+                } catch (e) { alert(e.message); }
+            });
+        });
+        container.querySelectorAll('.preset-delete-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                if (!confirm(`프리셋 '${btn.dataset.name}'을 삭제하시겠습니까?`)) return;
+                try {
+                    const result = await deletePresetApi(btn.dataset.name);
+                    if (result.success) loadPresets();
+                } catch (e) { alert(e.message); }
+            });
+        });
+
+        // 자동 전환 토글 상태 반영
+        const status = await getAutoScalpingStatus();
+        const toggle = document.getElementById('auto-switch-toggle');
+        if (toggle && status.preset_status) {
+            toggle.checked = status.preset_status.auto_switch_enabled;
+        }
+    } catch (e) {
+        console.warn('[Presets] 로드 실패:', e);
+    }
+}
+
+function displayReviewResult(review) {
+    const container = document.getElementById('ai-review-result');
+    const content = document.getElementById('ai-review-content');
+    container.style.display = 'block';
+
+    const isWeekly = review.review_type === 'weekly';
+    const summary = isWeekly ? review.weekly_summary : review.performance_summary;
+    const changes = review.parameter_changes || {};
+    const changeCount = Object.keys(changes).length;
+    const recommendations = isWeekly
+        ? (review.strategy_overhaul || [])
+        : (review.strategy_recommendations || []);
+
+    content.innerHTML = `
+        <div style="margin-bottom:10px;">
+            <span style="font-weight:700; color:#6c5ce7;">[${isWeekly ? '주간 심층' : '일간'} 리뷰]</span>
+            <span style="font-size:0.75rem; color:var(--text-secondary);">${review.timestamp || ''}</span>
+        </div>
+        <div style="margin-bottom:10px; line-height:1.5;">${summary}</div>
+        ${review.risk_assessment ? `<div style="margin-bottom:8px;"><b>리스크:</b> ${review.risk_assessment}</div>` : ''}
+        ${review.next_action ? `<div style="margin-bottom:8px;"><b>내일 핵심:</b> ${review.next_action}</div>` : ''}
+        ${isWeekly && review.insight ? `<div style="margin-bottom:8px;"><b>인사이트:</b> ${review.insight}</div>` : ''}
+        ${changeCount > 0 ? `
+            <div style="margin-top:10px; padding:10px; background:var(--bg-tertiary); border-radius:8px;">
+                <b>파라미터 조정안 (${changeCount}개):</b>
+                <pre style="margin:6px 0 0; font-size:0.8rem; white-space:pre-wrap;">${JSON.stringify(changes, null, 2)}</pre>
+            </div>` : '<div style="color:var(--text-secondary);">파라미터 변경 없음</div>'}
+        ${recommendations.length > 0 ? `
+            <div style="margin-top:8px;">
+                <b>전략 권고:</b>
+                <ul style="margin:4px 0 0 16px; padding:0;">${recommendations.map(r => `<li>${r}</li>`).join('')}</ul>
+            </div>` : ''}
+    `;
+}
+
+async function loadAIStatus() {
+    try {
+        const status = await getAIStatus();
+        const badge = document.getElementById('ai-status-badge');
+        if (status.available) {
+            badge.textContent = '감독관 모드';
+            badge.style.background = 'linear-gradient(135deg, #6c5ce720, #a29bfe40)';
+            badge.style.color = '#6c5ce7';
+        } else {
+            badge.textContent = 'API 미연결';
+        }
+
+        if (status.last_review_result) {
+            displayReviewResult(status.last_review_result);
+            document.getElementById('ai-apply-btn').disabled = false;
+        }
+
+        // 히스토리 로드
+        const historyData = await getReviewHistory(10);
+        const historyEl = document.getElementById('ai-review-history');
+        const reviews = historyData.reviews || [];
+        if (reviews.length > 0) {
+            historyEl.innerHTML = reviews.map(r => {
+                const type = r.review_type === 'weekly' ? '[주간]' : '[일간]';
+                const summary = r.performance_summary || r.weekly_summary || '';
+                const ts = r.timestamp ? r.timestamp.split('T')[0] : '';
+                const changes = Object.keys(r.parameter_changes || {}).length;
+                return `<div style="padding:4px 0; border-bottom:1px solid var(--border-color);">
+                    <span style="color:#6c5ce7; font-weight:600;">${type}</span>
+                    <span style="color:var(--text-secondary);">${ts}</span>
+                    ${changes > 0 ? `<span style="color:#00b894;">[${changes}개 변경]</span>` : ''}
+                    <br>${summary.substring(0, 100)}${summary.length > 100 ? '...' : ''}
+                </div>`;
+            }).join('');
+        }
+    } catch (err) {
+        console.warn('[AI Status] 로드 실패:', err);
+    }
 }
 
 // ═══ Mode Switching ═══
@@ -1010,102 +1320,86 @@ function detectPreset(config) {
 
 // --- Config ---
 async function loadConfig() {
-    const config = await getScalpingConfig();
-    if (config.error) return;
+    // 프리셋 기반 설정 로드
+    try {
+        const status = await getAutoScalpingStatus();
+        const config = status.config || {};
+        const presetName = status.active_preset || '';
 
-    document.getElementById('cfg-tick-momentum').checked = config.use_tick_momentum !== false;
-    document.getElementById('cfg-vwap').checked = config.use_vwap_deviation !== false;
-    document.getElementById('cfg-orderbook').checked = config.use_orderbook_imbalance !== false;
-    document.getElementById('cfg-bollinger').checked = config.use_bollinger_scalp !== false;
-    document.getElementById('cfg-ema-cross').checked = config.use_ema_cross === true;
-    document.getElementById('cfg-stochastic').checked = config.use_stochastic === true;
-    document.getElementById('cfg-macd').checked = config.use_macd === true;
-    document.getElementById('cfg-alma').checked = config.use_alma === true;
-    document.getElementById('cfg-exec-strength').checked = config.use_execution_strength === true;
-    document.getElementById('cfg-quantity').value = config.order_quantity || 10;
-    document.getElementById('cfg-price-type').value = config.price_type || 'market';
-    document.getElementById('cfg-stop-loss').value = config.stop_loss_pct || 0.5;
-    document.getElementById('cfg-take-profit').value = config.take_profit_pct || 1.5;
-    document.getElementById('cfg-max-pos').value = config.max_position_count || 3;
-    document.getElementById('cfg-max-loss').value = config.max_daily_loss || 100000;
-    document.getElementById('cfg-max-hold').value = config.max_hold_seconds || 300;
-    document.getElementById('cfg-cooldown').value = config.cooldown_seconds || 5;
-    document.getElementById('cfg-tick-window').value = config.tick_window || 20;
-    document.getElementById('cfg-momentum-threshold').value = config.tick_momentum_threshold || 0.7;
-    document.getElementById('cfg-vwap-dev').value = config.vwap_entry_deviation || 0.3;
-    document.getElementById('cfg-imbalance').value = config.imbalance_threshold || 2.0;
-    document.getElementById('cfg-bb-window').value = config.bb_window || 30;
-    document.getElementById('cfg-bb-std').value = config.bb_std || 2.0;
+        // 프리셋 이름 표시
+        const nameEl = document.getElementById('preset-config-name');
+        if (nameEl) nameEl.textContent = presetName ? `[${status.preset_status?.active_display_name || presetName}]` : '';
 
-    // Detect and set current preset
-    _currentPreset = detectPreset(config);
-    document.getElementById('cfg-preset').value = _currentPreset;
+        // 활성 전략 표시
+        const stratEl = document.getElementById('preset-active-strategies');
+        if (stratEl) {
+            const allStrats = [
+                ['use_tick_momentum', '틱 모멘텀'],
+                ['use_vwap_deviation', 'VWAP 이탈'],
+                ['use_orderbook_imbalance', '호가 불균형'],
+                ['use_bollinger_scalp', '볼린저 스캘핑'],
+                ['use_rsi_extreme', 'RSI 과매수/과매도'],
+                ['use_volume_spike', '거래량 급증'],
+                ['use_ema_crossover', 'EMA 크로스'],
+                ['use_trade_intensity', '체결강도'],
+                ['use_tick_acceleration', '틱 가속도'],
+            ];
+            stratEl.innerHTML = allStrats.map(([key, label]) => {
+                const on = config[key] === true;
+                return `<div style="display:flex; align-items:center; gap:8px; padding:2px 0;">
+                    <span style="width:8px; height:8px; border-radius:50%; background:${on ? '#00b894' : '#ddd'}; display:inline-block;"></span>
+                    <span style="color:${on ? 'var(--text-primary)' : 'var(--text-secondary)'}; ${on ? 'font-weight:600' : ''}">${label}</span>
+                </div>`;
+            }).join('');
+        }
+
+        // 익절/손절/리스크 설정
+        const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+        const setChk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = val; };
+        setVal('cfg-take-profit', config.take_profit_pct || 1.5);
+        setVal('cfg-stop-loss', config.stop_loss_pct || 0.5);
+        setVal('cfg-trailing-stop', config.trailing_stop_pct || 0.5);
+        setChk('cfg-use-trailing', config.use_trailing_stop === true);
+        setVal('cfg-max-hold', config.max_hold_seconds || 300);
+        setVal('cfg-max-pos', config.max_position_count || 3);
+        setVal('cfg-max-loss', config.max_daily_loss || 50000);
+        setVal('cfg-max-invest', config.max_investment_per_trade || 500000);
+        setVal('cfg-quantity', config.order_quantity || 10);
+        setVal('cfg-cooldown', config.cooldown_seconds || 3);
+        setVal('cfg-max-trades', config.max_daily_trades || 50);
+    } catch (e) {
+        console.warn('[Config] 로드 실패:', e);
+    }
 }
 
 async function saveConfig() {
-    const presetKey = document.getElementById('cfg-preset').value;
     const config = {
-        preset: presetKey,
-        use_tick_momentum: document.getElementById('cfg-tick-momentum').checked,
-        use_vwap_deviation: document.getElementById('cfg-vwap').checked,
-        use_orderbook_imbalance: document.getElementById('cfg-orderbook').checked,
-        use_bollinger_scalp: document.getElementById('cfg-bollinger').checked,
-        use_ema_cross: document.getElementById('cfg-ema-cross').checked,
-        use_stochastic: document.getElementById('cfg-stochastic').checked,
-        use_macd: document.getElementById('cfg-macd').checked,
-        use_alma: document.getElementById('cfg-alma').checked,
-        use_execution_strength: document.getElementById('cfg-exec-strength').checked,
-        order_quantity: parseInt(document.getElementById('cfg-quantity').value),
-        price_type: document.getElementById('cfg-price-type').value,
-        stop_loss_pct: parseFloat(document.getElementById('cfg-stop-loss').value),
         take_profit_pct: parseFloat(document.getElementById('cfg-take-profit').value),
+        stop_loss_pct: parseFloat(document.getElementById('cfg-stop-loss').value),
+        trailing_stop_pct: parseFloat(document.getElementById('cfg-trailing-stop').value),
+        use_trailing_stop: document.getElementById('cfg-use-trailing').checked,
+        max_hold_seconds: parseFloat(document.getElementById('cfg-max-hold').value),
         max_position_count: parseInt(document.getElementById('cfg-max-pos').value),
         max_daily_loss: parseFloat(document.getElementById('cfg-max-loss').value),
-        max_hold_seconds: parseFloat(document.getElementById('cfg-max-hold').value),
+        max_investment_per_trade: parseInt(document.getElementById('cfg-max-invest').value),
+        order_quantity: parseInt(document.getElementById('cfg-quantity').value),
         cooldown_seconds: parseFloat(document.getElementById('cfg-cooldown').value),
-        tick_window: parseInt(document.getElementById('cfg-tick-window').value),
-        tick_momentum_threshold: parseFloat(document.getElementById('cfg-momentum-threshold').value),
-        vwap_entry_deviation: parseFloat(document.getElementById('cfg-vwap-dev').value),
-        imbalance_threshold: parseFloat(document.getElementById('cfg-imbalance').value),
-        bb_window: parseInt(document.getElementById('cfg-bb-window').value),
-        bb_std: parseFloat(document.getElementById('cfg-bb-std').value),
+        max_daily_trades: parseInt(document.getElementById('cfg-max-trades').value),
     };
 
     const btn = document.getElementById('scalp-save-config');
     btn.textContent = '저장 중...';
 
-    // 수동 모드 설정 저장
-    const result = await updateScalpingConfig(config);
-
-    // 자동 모드 설정도 동기화 (공통 파라미터)
     try {
-        await updateAutoScalpingConfig({
-            stop_loss_pct: config.stop_loss_pct,
-            take_profit_pct: config.take_profit_pct,
-            trailing_stop_pct: Math.max(0.5, config.stop_loss_pct),
-            max_position_count: config.max_position_count,
-            max_daily_loss: config.max_daily_loss,
-            max_hold_seconds: config.max_hold_seconds,
-            cooldown_seconds: config.cooldown_seconds,
-            order_quantity: config.order_quantity,
-            price_type: config.price_type,
-            use_tick_momentum: config.use_tick_momentum,
-            use_vwap_deviation: config.use_vwap_deviation,
-            use_orderbook_imbalance: config.use_orderbook_imbalance,
-            use_bollinger_scalp: config.use_bollinger_scalp,
-            tick_window: config.tick_window,
-            tick_momentum_threshold: config.tick_momentum_threshold,
-            vwap_entry_deviation: config.vwap_entry_deviation,
-            imbalance_threshold: config.imbalance_threshold,
-            bb_window: config.bb_window,
-            bb_std: config.bb_std,
-        });
-        console.log('[Config] Auto-scalping config synced');
+        // 수동 모드 저장
+        await updateScalpingConfig(config);
+        // 자동 모드 동기화
+        await updateAutoScalpingConfig(config);
+        btn.textContent = '저장 완료!';
+        btn.style.background = '#00b894';
     } catch (e) {
-        console.warn('[Config] Auto-scalping sync failed:', e);
+        btn.textContent = '저장 실패';
+        btn.style.background = '#e74c3c';
     }
-
-    const presetLabel = PRESETS[presetKey]?.label || presetKey;
-    btn.textContent = result.success ? `[${presetLabel}] 저장 완료!` : '저장 실패';
-    setTimeout(() => { btn.textContent = '저장'; }, 2000);
+    setTimeout(() => { btn.textContent = '설정 저장'; btn.style.background = ''; }, 2000);
 }

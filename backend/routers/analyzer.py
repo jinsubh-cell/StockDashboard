@@ -13,7 +13,7 @@ class ForceConfigRequest(BaseModel):
     config: dict
 
 
-# ── Brain (학습/진화) ─���
+# ── Brain (학습/진화) ──
 
 @router.get("/brain")
 async def get_brain_status():
@@ -46,18 +46,18 @@ async def reset_brain():
     return {"success": True, "message": "AI 두뇌 초기화 완료"}
 
 
-# ── Advisor (실시간 매매 제어) ──
+# ── Advisor (감독관 모드 - 리뷰 상태) ──
 
 @router.get("/advisor")
 async def get_advisor_status():
-    """AI 어드바이저 상태 - 시장 모드, 포지션 오버라이드, 최근 판단"""
+    """AI 감독관 상태 - 리뷰 이력, 최근 리뷰 결과"""
     return ai_advisor.get_status()
 
 
-@router.get("/decisions")
-async def get_decisions(limit: int = Query(50, ge=1, le=500)):
-    """AI 판단 이력 (종목선정, 진입승인/거부, 홀딩판단, 시장분석)"""
-    return ai_advisor.get_decisions(limit)
+@router.get("/reviews")
+async def get_reviews(limit: int = Query(20, ge=1, le=100)):
+    """AI 리뷰 이력 (일간/주간 전략 리뷰)"""
+    return ai_advisor.get_reviews(limit)
 
 
 @router.post("/apply")
