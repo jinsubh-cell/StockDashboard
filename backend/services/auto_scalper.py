@@ -771,10 +771,12 @@ class RiskManager:
             pos.peak_pnl_pct = pnl_pct
 
         # Tier 3: 본전 보호 — 피크 갔다 왔으면 이익을 손실로 만들지 않음
+        # ⚠️ 수수료(왕복 0.21%) 이상 확보한 상태에서만 작동 (수수료 손실 청산 방지)
+        COMMISSION_FLOOR = 0.25  # 왕복수수료+여유
         if self.config.breakeven_protect_enabled:
-            if pos.peak_pnl_pct >= self.config.breakeven_protect_peak_pct:
-                tol = self.config.breakeven_protect_tolerance
-                if pnl_pct <= tol:
+            if pos.peak_pnl_pct >= max(self.config.breakeven_protect_peak_pct, COMMISSION_FLOOR * 2):
+                tol = max(self.config.breakeven_protect_tolerance, COMMISSION_FLOOR)
+                if pnl_pct <= tol and pnl_pct >= COMMISSION_FLOOR:
                     return f"본전보호 (피크 +{pos.peak_pnl_pct:.2f}% → 현재 {pnl_pct:+.2f}%)"
 
         # Tier 1: 손절
@@ -806,11 +808,15 @@ class RiskManager:
             if current_price >= trailing_stop and pnl_pct > min_profit_for_trailing:
                 return f"트레일링스탑 (저점 {pos.lowest_since_entry}→현재 {current_price})"
 
-        # Tier 4: 안전망 시간 (알람성) — 보유가 너무 길면 최후의 수단으로 청산
-        # NOTE: 스캘핑의 본질은 "근거가 살아있는 한 보유". 시간은 트리거가 아니라 안전망.
+        # Tier 4: 안전망 시간 — 수수료 손실 구간에서는 강제청산 금지
+        # 수수료 구간(-0.25% ~ +0.25%)이면 stop_loss / take_profit이 결정할 때까지 보유
         hold_time = time.time() - pos.entry_time
         if hold_time >= self.config.max_hold_seconds:
-            return f"안전망시간초과 ({hold_time:.0f}초 / 한도 {self.config.max_hold_seconds:.0f}s)"
+            if pnl_pct <= -COMMISSION_FLOOR or pnl_pct >= COMMISSION_FLOOR:
+                return f"안전망시간초과 ({hold_time:.0f}초 / 한도 {self.config.max_hold_seconds:.0f}s, {pnl_pct:+.2f}%)"
+            # 수수료 손실 구간 → 2배까지 연장 (그래도 안 움직이면 청산)
+            if hold_time >= self.config.max_hold_seconds * 2:
+                return f"시간최종초과 ({hold_time:.0f}초, {pnl_pct:+.2f}%)"
 
         return None
 
@@ -841,10 +847,11 @@ class RiskManager:
         # 현재 손익
         pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
 
-        # 이익 구간(+0.1% 초과)에서는 트레일링/익절이 담당 - 근거 소멸 청산 skip
-        # 근거 소멸은 "본전 근처 or 소폭 손실"에서 빨리 나오기 위한 것
-        if pnl_pct > 0.10:
-            return None
+        # ⚠️ 수수료 손실 구간(-0.25% ~ +0.25%)에서는 청산 금지 (수수료만 내고 나오기 방지)
+        # 근거소멸 청산은 "확실한 손실 확대 방지용"으로만 작동
+        COMMISSION_FLOOR = 0.25
+        if pnl_pct > -COMMISSION_FLOOR:
+            return None  # 손절선 근처까지 손실이어야 근거소멸 청산 의미 있음
 
         # 최소 보유 시간 (진입 직후 노이즈로 청산되는 것 방지): 8초
         if (time.time() - pos.entry_time) < 8.0:
