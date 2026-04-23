@@ -732,13 +732,24 @@ class RiskManager:
         self._recent_pnls: list = []
         self._consecutive_losses: int = 0
         self._original_config_snapshot: dict = None
+        # 종목별 손실 추적 (함정 종목 차단용)
+        self._code_loss_count: dict = {}   # code -> 연속 손실 횟수
+        self._code_total_loss: dict = {}   # code -> 일일 누적 손실
+        self._code_blacklist: set = set()  # 일일 블랙리스트
 
-    def can_open(self, positions: dict) -> Tuple[bool, str]:
+    def can_open(self, positions: dict, code: str = None) -> Tuple[bool, str]:
         """진입 가능 여부 확인"""
         # 장 시간 확인
         market_ok, msg = is_market_open()
         if not market_ok:
             return False, msg
+
+        # 장초반 변동성 회피: 09:00~09:15 진입 금지
+        # (분석결과 장초반 특정 종목 5연속 -1,250원씩 총 -6,261원 손실)
+        from datetime import datetime as _dt
+        now = _dt.now()
+        if now.hour == 9 and now.minute < 15:
+            return False, f"장초반 변동성 회피 ({now.strftime('%H:%M')})"
 
         # 일일 손실 한도
         if self.daily_pnl <= -self.config.max_daily_loss:
@@ -752,12 +763,31 @@ class RiskManager:
         if len(positions) >= self.config.max_position_count:
             return False, f"최대 포지션 도달 ({len(positions)}개)"
 
+        # 종목 블랙리스트 (일일)
+        if code and code in self._code_blacklist:
+            return False, f"종목블랙리스트 ({code} 당일 제외)"
+
         # 쿨다운
         elapsed = time.time() - self.last_trade_time
         if elapsed < self.config.cooldown_seconds:
             return False, f"쿨다운 중 ({elapsed:.1f}s)"
 
         return True, "OK"
+
+    def record_trade_result(self, code: str, pnl: float):
+        """매매 결과 기록 + 종목별 함정 탐지"""
+        if pnl <= 0:
+            self._code_loss_count[code] = self._code_loss_count.get(code, 0) + 1
+            self._code_total_loss[code] = self._code_total_loss.get(code, 0) + abs(pnl)
+            # 연속 3패 OR 누적 손실 2000원 초과 → 블랙리스트
+            if self._code_loss_count[code] >= 3 or self._code_total_loss.get(code, 0) > 2000:
+                self._code_blacklist.add(code)
+                logger.info(f"[블랙리스트] {code} 추가 "
+                            f"(연속손실 {self._code_loss_count[code]}회, "
+                            f"누적 {self._code_total_loss[code]:,.0f}원)")
+        else:
+            # 이익 시 연속 손실 카운트 리셋 (해당 종목)
+            self._code_loss_count[code] = 0
 
     def check_exit(self, pos: Position, current_price: int) -> Optional[str]:
         """청산 조건 확인 (Tier 1 하드룰 + Tier 4 안전망 시간)"""
@@ -974,18 +1004,23 @@ class RiskManager:
 
         return None
 
-    def record_trade(self, net_pnl: float):
+    def record_trade(self, net_pnl: float, code: str = None):
         self.daily_pnl += net_pnl
         self.daily_trades += 1
         self.last_trade_time = time.time()
         self._recent_pnls.append(net_pnl)
         self._adaptive_tune()
+        if code:
+            self.record_trade_result(code, net_pnl)
 
     def reset_daily(self):
         self.daily_pnl = 0.0
         self.daily_trades = 0
         self._recent_pnls = []
         self._consecutive_losses = 0
+        self._code_loss_count = {}
+        self._code_total_loss = {}
+        self._code_blacklist = set()
 
     # ── 룰 기반 실시간 파라미터 미세 조정 ──
 
@@ -1452,8 +1487,8 @@ class AutoScalpingSystem:
         if time.time() < self._insufficient_cash_until:
             return
 
-        # 3. 진입 가능 여부 확인
-        can_open, reason = self.risk.can_open(self.positions)
+        # 3. 진입 가능 여부 확인 (종목 블랙리스트 체크 포함)
+        can_open, reason = self.risk.can_open(self.positions, code)
         if not can_open:
             return
 
@@ -1943,8 +1978,8 @@ class AutoScalpingSystem:
         except Exception as e:
             logger.error(f"[매매일지/Brain/Preset] 기록 실패: {e}")
 
-        # 통계 업데이트
-        self.risk.record_trade(net_pnl)
+        # 통계 업데이트 (종목 블랙리스트 학습 포함)
+        self.risk.record_trade(net_pnl, pos.code)
         self.stats["total_trades"] = self.stats.get("total_trades", 0) + 1
         self.stats["total_gross_pnl"] += gross_pnl
         self.stats["total_net_pnl"] += net_pnl
