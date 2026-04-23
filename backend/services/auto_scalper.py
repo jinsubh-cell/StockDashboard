@@ -1495,18 +1495,22 @@ class AutoScalpingSystem:
             strategy_perf = brain_data.get("strategy_scores", {}).get(strategy_name, {})
             tc = strategy_perf.get("trade_count", 0)
 
-            if tc >= 5:
+            # 충분한 표본이 쌓이기 전에는 Brain 필터를 적용하지 않음
+            # (소표본 편향으로 유일 활성 전략이 영구 차단되는 것을 방지)
+            MIN_SAMPLE_FOR_REJECT = 20
+            if tc >= MIN_SAMPLE_FOR_REJECT:
                 win_rate = strategy_perf.get("wins", 0) / tc
-                recent_pnls = strategy_perf.get("recent_pnls", [])[-5:]
+                recent_pnls = strategy_perf.get("recent_pnls", [])[-10:]
                 recent_loss_count = sum(1 for p in recent_pnls if p <= 0)
 
-                # 조건1: 승률 30% 미만 → 진입 거부
-                # 조건2: 최근 5건 중 4건 이상 손실 → 진입 거부
-                # 조건3: 총 손익이 마이너스이고 승률 40% 미만 → 진입 거부
+                # 완화된 기준 (표본 20건 이상일 때만 적용):
+                # 조건1: 승률 25% 미만 → 거부
+                # 조건2: 최근 10건 전부 손실 → 거부 (완전 연패)
+                # 조건3: 누적 손실 5천원 초과 + 승률 35% 미만 → 거부
                 total_pnl = strategy_perf.get("total_pnl", 0)
-                if (win_rate < 0.3) or (recent_loss_count >= 4) or (total_pnl < 0 and win_rate < 0.4):
-                    reject_reason = (f"승률 {win_rate:.0%}, 최근5건 중 {recent_loss_count}패, "
-                                     f"누적PnL {total_pnl:+,.0f}")
+                if (win_rate < 0.25) or (recent_loss_count >= 10) or (total_pnl < -5000 and win_rate < 0.35):
+                    reject_reason = (f"승률 {win_rate:.0%}, 최근10건 중 {recent_loss_count}패, "
+                                     f"누적PnL {total_pnl:+,.0f} (표본 {tc}건)")
                     self.signal_log.append({
                         "time": datetime.now().strftime("%H:%M:%S"),
                         "code": code,
@@ -1518,14 +1522,14 @@ class AutoScalpingSystem:
                     logger.info(f"[룰거부] {code} {consensus['strategy']} - {reject_reason}")
                     return
 
-            # 시간대 필터: 해당 시간대 승률이 극히 나쁘면 거부
+            # 시간대 필터: 표본 20건 이상 + 승률 20% 미만일 때만 거부 (완화)
             current_hour = datetime.now().strftime("%H")
             time_scores = brain_data.get("time_scores", {})
             time_perf = time_scores.get(current_hour, {})
             time_tc = time_perf.get("trade_count", 0)
-            if time_tc >= 8:
+            if time_tc >= 20:
                 time_wr = time_perf.get("wins", 0) / time_tc
-                if time_wr < 0.25:
+                if time_wr < 0.20:
                     logger.info(f"[시간대거부] {current_hour}시 승률 {time_wr:.0%} ({time_tc}건) → 진입 거부")
                     return
 
