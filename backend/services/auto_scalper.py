@@ -1476,27 +1476,38 @@ class AutoScalpingSystem:
                     pass
             return
 
-        # 6. 룰 기반 진입 필터 (Brain 학습 데이터 활용 - 강화)
+        # 6. 룰 기반 진입 필터 + Brain 학습 활용 (개선판)
         try:
             brain_data = trade_brain.brain if trade_brain else {}
             strategy_name = consensus.get("strategy", "")
             strategy_perf = brain_data.get("strategy_scores", {}).get(strategy_name, {})
             tc = strategy_perf.get("trade_count", 0)
+            strategy_count = len(consensus.get("strategy", "").split(","))  # 컨센서스 포함 전략 수
 
-            # 충분한 표본이 쌓이기 전에는 Brain 필터를 적용하지 않음
-            # (소표본 편향으로 유일 활성 전략이 영구 차단되는 것을 방지)
-            MIN_SAMPLE_FOR_REJECT = 20
-            if tc >= MIN_SAMPLE_FOR_REJECT:
+            # ── (A) 검증된 우수 조합은 무조건 진입 허용 (승률 50% 이상 & 5건 이상)
+            bypass_filter = False
+            if tc >= 5:
+                win_rate = strategy_perf.get("wins", 0) / tc
+                if win_rate >= 0.50:
+                    total_pnl = strategy_perf.get("total_pnl", 0)
+                    logger.info(f"[우수조합] {strategy_name} 승률 {win_rate:.0%} "
+                                f"누적 {total_pnl:+,.0f}원 ({tc}건) → 필터 통과")
+                    bypass_filter = True
+
+            # ── (B) 표본 충분 시 저승률 거부 (10건으로 완화)
+            if not bypass_filter and tc >= 10:
                 win_rate = strategy_perf.get("wins", 0) / tc
                 recent_pnls = strategy_perf.get("recent_pnls", [])[-10:]
                 recent_loss_count = sum(1 for p in recent_pnls if p <= 0)
-
-                # 완화된 기준 (표본 20건 이상일 때만 적용):
-                # 조건1: 승률 25% 미만 → 거부
-                # 조건2: 최근 10건 전부 손실 → 거부 (완전 연패)
-                # 조건3: 누적 손실 5천원 초과 + 승률 35% 미만 → 거부
                 total_pnl = strategy_perf.get("total_pnl", 0)
-                if (win_rate < 0.25) or (recent_loss_count >= 10) or (total_pnl < -5000 and win_rate < 0.35):
+
+                # 단일 전략이고 승률 30% 미만이면 거부 (복수 조합은 서로 보완 가능성)
+                single_bad = (strategy_count == 1 and win_rate < 0.30)
+                multi_bad = (strategy_count >= 2 and win_rate < 0.20)
+                losing_streak = (recent_loss_count >= 8)
+                chronic_loss = (total_pnl < -3000 and win_rate < 0.35)
+
+                if single_bad or multi_bad or losing_streak or chronic_loss:
                     reject_reason = (f"승률 {win_rate:.0%}, 최근10건 중 {recent_loss_count}패, "
                                      f"누적PnL {total_pnl:+,.0f} (표본 {tc}건)")
                     self.signal_log.append({
@@ -1510,7 +1521,30 @@ class AutoScalpingSystem:
                     logger.info(f"[룰거부] {code} {consensus['strategy']} - {reject_reason}")
                     return
 
-            # 시간대 필터: 표본 20건 이상 + 승률 20% 미만일 때만 거부 (완화)
+            # ── (C) 더 우수한 조합이 활성 중이면 저성능 단일 전략 진입 보류
+            # 현재 시그널에 어떤 전략이 포함되어 있는지 확인
+            if not bypass_filter and strategy_count == 1:
+                # 최근 10건 승률이 1건만 낮으면 '더 나은 조합 대기' 모드
+                all_scores = brain_data.get("strategy_scores", {})
+                better_combo_exists = False
+                for sname, perf in all_scores.items():
+                    if len(sname.split(",")) >= 2 and perf.get("trade_count", 0) >= 3:
+                        pwr = perf.get("wins", 0) / perf.get("trade_count", 1)
+                        if pwr >= 0.5:
+                            # 이 조합의 전략들이 현재 시그널에 일부 포함돼있으면 기다림
+                            combo_strats = set(sname.replace("consensus(", "").replace(")", "").split(","))
+                            cur_strats = set(strategy_name.replace("consensus(", "").replace(")", "").split(","))
+                            if cur_strats & combo_strats:
+                                better_combo_exists = True
+                                break
+                if better_combo_exists and tc >= 5:
+                    cur_wr = strategy_perf.get("wins", 0) / tc
+                    if cur_wr < 0.4:
+                        logger.info(f"[조합대기] {code} 단일 {strategy_name} 승률 {cur_wr:.0%} "
+                                    f"→ 더 나은 조합 대기")
+                        return
+
+            # ── (D) 시간대 필터
             current_hour = datetime.now().strftime("%H")
             time_scores = brain_data.get("time_scores", {})
             time_perf = time_scores.get(current_hour, {})
