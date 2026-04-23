@@ -39,10 +39,10 @@ class TradeBrain:
         self._brain_file = BRAIN_DIR / "brain.json"
         BRAIN_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 진화 설정 (승률 70% 목표, API 비용 절약)
-        self.evolve_every_n = 20          # 20거래마다 Claude AI 호출 (비용 절약)
-        self.min_trades_to_evolve = 20    # 최소 20거래 후 진화 시작
-        self.deep_review_every_n = 50     # 50거래마다 심층 리뷰
+        # 진화 설정 (승률 70% 목표)
+        self.evolve_every_n = 10          # 10거래마다 Claude AI 호출
+        self.min_trades_to_evolve = 10    # 최소 10거래 후 진화 시작
+        self.deep_review_every_n = 30     # 30거래마다 심층 리뷰
         self.target_win_rate = 70.0       # 목표 승률 70%
         # 5거래마다는 룰 기반 자동 조정 (API 호출 없음)
 
@@ -462,7 +462,7 @@ class TradeBrain:
     # ════════════════════════════════════════════
 
     def _rule_based_evolve(self) -> dict:
-        """Claude 없이 통계 규칙으로 진화 (승률 70% 목표 세밀 학습)"""
+        """Claude 없이 통계 규칙으로 진화 (수수료 고려 보수적 학습)"""
         changes = {}
         reasons = []
 
@@ -479,38 +479,57 @@ class TradeBrain:
         }
 
         # 1. 전략별 성과 분석 → 비활성화/활성화
-        best_strategy = None
-        best_win_rate = 0
+        # 단일 전략별로 조합을 포함한 모든 통계 합산 후 판단 (조합명 오매칭 버그 방지)
+        from collections import defaultdict
+        single_strategy_stats = defaultdict(lambda: {
+            "trade_count": 0, "wins": 0, "total_pnl": 0.0,
+            "combo_appearances": 0,  # 조합에 포함된 횟수
+        })
+
         for name, s in self.brain["strategy_scores"].items():
-            if s["trade_count"] < 3:
+            tc = s.get("trade_count", 0)
+            if tc < 1:
                 continue
-            win_rate = s["wins"] / s["trade_count"]
-            recent = s["recent_pnls"][-10:]
-            recent_pnl = sum(recent)
+            # consensus(A,B,C) 형식에서 참여 전략 추출
+            inner = name.replace("consensus(", "").replace(")", "").strip()
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
+            is_combo = len(parts) >= 2
 
-            # 최고 승률 전략 추적
-            if win_rate > best_win_rate:
-                best_win_rate = win_rate
-                best_strategy = name
+            for strat in parts:
+                agg = single_strategy_stats[strat]
+                agg["trade_count"] += tc
+                agg["wins"] += s.get("wins", 0)
+                agg["total_pnl"] += s.get("total_pnl", 0)
+                if is_combo:
+                    agg["combo_appearances"] += tc
 
-            config_key = None
-            for pattern, key in strategy_to_config.items():
-                if pattern in name.lower().replace(" ", "_"):
-                    config_key = key
-                    break
+        # 단일 전략별 종합 성과로 on/off 판정
+        for strat, agg in single_strategy_stats.items():
+            config_key = strategy_to_config.get(strat)
             if not config_key:
                 continue
+            tc = agg["trade_count"]
+            if tc < 5:
+                continue
+            win_rate = agg["wins"] / tc
+            total_pnl = agg["total_pnl"]
+            combo_ratio = agg["combo_appearances"] / tc  # 조합 참여 비율
 
-            # 승률 30% 미만 + 최근 손실 → 비활성화
-            if recent_pnl < 0 and win_rate < 0.30:
+            # 조합에서 효과적이면 유지 (단일로 나빠도 조합에서 좋을 수 있음)
+            if combo_ratio >= 0.5 and total_pnl > -3000:
+                # 조합 중심 전략 → 유지
+                continue
+
+            # 매우 나쁜 전략만 비활성화 (승률 20% 미만 또는 누적 -3천원 초과 & 승률 30% 미만)
+            if win_rate < 0.20 or (total_pnl < -3000 and win_rate < 0.30):
                 changes[config_key] = False
-                reasons.append(f"[전략] {name} 비활성화: 승률{win_rate*100:.0f}%")
-            # 승률 70% 이상 + 비활성 상태면 활성화 권고
-            elif win_rate >= 0.70 and s["trade_count"] >= 5:
+                reasons.append(f"[전략비활성화] {strat}: 승률{win_rate*100:.0f}%, 누적{total_pnl:+,.0f}원 ({tc}건)")
+            # 승률 55% 이상 + 누적 수익 양수 → 활성화
+            elif win_rate >= 0.55 and total_pnl > 0:
                 changes[config_key] = True
-                reasons.append(f"[전략] {name} 유지/활성화: 승률{win_rate*100:.0f}%")
+                reasons.append(f"[전략활성화] {strat}: 승률{win_rate*100:.0f}%, 누적{total_pnl:+,.0f}원 ({tc}건)")
 
-        # 2. 손절/익절 비율 분석 → 세밀 조정
+        # 2. 손절/익절 비율 분석
         exit_p = self.brain["exit_patterns"]
         sl_count = 0
         tp_count = 0
@@ -531,46 +550,43 @@ class TradeBrain:
         total_exits = sl_count + tp_count + trail_count + timeout_count
         if total_exits >= 5:
             sl_ratio = sl_count / total_exits
+            timeout_ratio = timeout_count / total_exits
 
-            # 손절 비율 60% 이상 → 손절폭 확대 (너무 빨리 손절)
-            if sl_ratio > 0.60:
-                current_sl = self._get_config_val("stop_loss_pct", 0.5)
-                new_sl = round(min(1.5, current_sl * 1.1), 2)
+            # 손절 비율 40% 이상 → 손절폭 확대 (기준 낮춤: 0.6→0.4)
+            if sl_ratio > 0.40:
+                current_sl = self._get_config_val("stop_loss_pct", 0.8)
+                new_sl = round(min(1.5, current_sl * 1.15), 2)
                 changes["stop_loss_pct"] = new_sl
-                reasons.append(f"[손절] 손절비율 {sl_ratio:.0%} → 손절폭 {current_sl}→{new_sl}%")
+                reasons.append(f"[손절] 비율 {sl_ratio:.0%} → 손절폭 확대 {current_sl}→{new_sl}%")
 
-            # 시간초과 비율 40% 이상 → 보유시간 확대
-            if timeout_count / total_exits > 0.40:
+            # 시간초과 비율 30% 이상 → 보유시간 확대
+            if timeout_ratio > 0.30:
                 current_hold = self._get_config_val("max_hold_seconds", 300)
-                new_hold = min(600, current_hold * 1.2)
-                changes["max_hold_seconds"] = round(new_hold)
-                reasons.append(f"[시간] 시간초과 {timeout_count}/{total_exits} → 보유시간 확대")
+                new_hold = min(600, int(current_hold * 1.3))
+                changes["max_hold_seconds"] = new_hold
+                reasons.append(f"[시간] 시간초과비율 {timeout_ratio:.0%} → 보유시간 {current_hold}→{new_hold}초")
 
-            # 익절+트레일링 비율이 높으면 → 익절 기준 약간 상향 (수익 극대화)
-            if (tp_count + trail_count) / total_exits > 0.50:
-                current_tp = self._get_config_val("take_profit_pct", 1.5)
-                new_tp = round(min(3.0, current_tp * 1.05), 2)
-                if new_tp != current_tp:
-                    changes["take_profit_pct"] = new_tp
-                    reasons.append(f"[익절] 익절비율 양호 → 익절 기준 소폭 상향 {new_tp}%")
+            # 손절+시간초과 합산 비율이 80% 이상 → 쿨다운 대폭 확대 (과매매 방지)
+            if (sl_ratio + timeout_ratio) > 0.80:
+                current_cd = self._get_config_val("cooldown_seconds", 10)
+                new_cd = min(30, int(current_cd * 1.5))
+                changes["cooldown_seconds"] = new_cd
+                reasons.append(f"[과매매] 손절+시간초과 {(sl_ratio+timeout_ratio):.0%} → 쿨다운 {new_cd}초")
 
-        # 3. 전체 승률 체크 → 컨센서스 조정
+        # 3. 전체 승률 체크 → 거래 빈도 조정 (컨센서스 대신 일일거래한도 조정)
         total_trades = self.brain["total_learned"]
         total_wins = sum(s.get("wins", 0) for s in self.brain["strategy_scores"].values())
         if total_trades >= 10:
             overall_win_rate = total_wins / total_trades
-            current_consensus = self._get_config_val("min_consensus", 2)
 
-            # 승률 50% 미만 → 컨센서스 상향 (보수적)
-            if overall_win_rate < 0.50 and current_consensus < 3:
-                changes["min_consensus"] = current_consensus + 1
-                reasons.append(f"[컨센서스] 승률 {overall_win_rate:.0%} → 합의 {current_consensus+1}개 필요")
-            # 승률 70% 이상 → 컨센서스 유지 또는 하향 (적극적)
-            elif overall_win_rate >= 0.70 and current_consensus > 2:
-                changes["min_consensus"] = current_consensus - 1
-                reasons.append(f"[컨센서스] 승률 {overall_win_rate:.0%} → 합의 {current_consensus-1}개로 완화")
+            # 승률 40% 미만 → 일일 거래 수 축소
+            if overall_win_rate < 0.40:
+                current_max = self._get_config_val("max_daily_trades", 20)
+                new_max = max(10, int(current_max * 0.8))
+                changes["max_daily_trades"] = new_max
+                reasons.append(f"[거래제한] 전체 승률 {overall_win_rate:.0%} → 일일 최대 {new_max}건으로 축소")
 
-        return {"config_changes": changes, "reasons": reasons, "insight": "규칙 기반 진화 (AI 미사용)"}
+        return {"config_changes": changes, "reasons": reasons, "insight": "규칙 기반 진화 (수수료 고려 보수적)"}
 
     # ════════════════════════════════════════════
     #  엔진 설정 적용
