@@ -1003,36 +1003,10 @@ class RiskManager:
 
         orig = self._original_config_snapshot
 
-        # 규칙 1: 연속 손실 → 단계별 방어 모드 (완화: 8패/5패 기준)
-        if self._consecutive_losses >= 8:
-            # 연속 8패: 강력방어 (30초 쿨다운)
-            self.config.cooldown_seconds = 30
-            self.config.max_investment_per_trade = max(
-                100_000, int(orig["max_investment_per_trade"] * 0.5))
-            logger.info(f"[AdaptiveTune] 강력방어: 연속 {self._consecutive_losses}패 "
-                        f"→ CD=30s, 투자금={self.config.max_investment_per_trade:,}")
-        elif self._consecutive_losses >= 5:
-            # 연속 5패: 가벼운 방어 (쿨다운 1.5배, 투자금 0.8배)
-            self.config.cooldown_seconds = min(20, int(orig["cooldown_seconds"] * 1.5))
-            self.config.max_investment_per_trade = max(
-                100_000, int(orig["max_investment_per_trade"] * 0.8))
-            logger.info(f"[AdaptiveTune] 방어모드: 연속 {self._consecutive_losses}패 "
-                        f"→ CD={self.config.cooldown_seconds:.1f}s, "
-                        f"투자금={self.config.max_investment_per_trade:,}")
-
-        # 규칙 2: 연속 3승 → 원래 설정 복원
-        recent_wins = sum(1 for p in self._recent_pnls[-3:] if p > 0)
-        if recent_wins >= 3 and self._consecutive_losses == 0:
-            self.config.stop_loss_pct = orig["stop_loss_pct"]
-            self.config.cooldown_seconds = orig["cooldown_seconds"]
-            self.config.max_investment_per_trade = orig["max_investment_per_trade"]
-            self.config.max_position_count = orig["max_position_count"]
-
-        # 규칙 3: 일일 손실 50% 도달 → 포지션 수 축소
-        if self.daily_pnl <= -self.config.max_daily_loss * 0.5:
-            self.config.max_position_count = max(1, orig["max_position_count"] - 1)
-            logger.info(f"[AdaptiveTune] 포지션 축소: 일일손실 {self.daily_pnl:,.0f}원 "
-                        f"→ 최대 {self.config.max_position_count}개")
+        # 방어모드 제거: 잃을수록 거래 축소하면 복구 불가능
+        # max_daily_loss (일일 손실 한도)가 최종 차단선 역할만 수행
+        # 연속 손실은 전략/청산 조건에서 해결해야 함 (파라미터 축소로 회피 X)
+        pass
 
 
 # ═══════════════════════════════════════════════════════
