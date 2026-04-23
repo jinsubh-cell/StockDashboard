@@ -433,8 +433,45 @@ class StrategyEngine:
 
         return signals
 
+    def _confirm_reversal_up(self, buf: TickBuffer) -> bool:
+        """바닥 반등 확인: 최근 5틱 중 저점 찍고 반등 중인지
+        - 역추세 매수 전략(BB하한/RSI과매도/VWAP하회)에서 '떨어지는 칼날 잡기' 방지
+        - 최저점이 최근 5틱 안에 있고 현재가가 최저점 대비 반등 시작했으면 True
+        """
+        if not buf:
+            return True  # 버퍼 없으면 기본 통과
+        prices = buf.prices(5)
+        if len(prices) < 5:
+            return True
+        low_idx = int(np.argmin(prices))
+        current = float(prices[-1])
+        low = float(prices[low_idx])
+        # 저점이 이미 지나갔고(최근 틱 아님) 현재가가 저점보다 높으면 반등
+        # 최저점이 현재 틱이면 아직 바닥 확인 안됨 → 대기
+        if low_idx >= len(prices) - 1:
+            return False  # 지금이 최저점 → 더 떨어질 수 있음
+        if current > low:
+            return True   # 저점 찍고 반등 중
+        return False
+
+    def _confirm_reversal_down(self, buf: TickBuffer) -> bool:
+        """천장 반락 확인 (매도 시그널용)"""
+        if not buf:
+            return True
+        prices = buf.prices(5)
+        if len(prices) < 5:
+            return True
+        high_idx = int(np.argmax(prices))
+        current = float(prices[-1])
+        high = float(prices[high_idx])
+        if high_idx >= len(prices) - 1:
+            return False
+        if current < high:
+            return True
+        return False
+
     def get_consensus(self, signals: List[dict], buf: TickBuffer = None) -> Optional[dict]:
-        """가중치 기반 컨센서스 + 추세 필터: 역추세 진입 차단"""
+        """가중치 기반 컨센서스 + 추세 필터 + 반등 확인 필터"""
         if not signals:
             return None
 
@@ -444,11 +481,18 @@ class StrategyEngine:
         buy_signals = [s for s in signals if s["side"] == Side.BUY]
         sell_signals = [s for s in signals if s["side"] == Side.SELL]
 
-        # 추세 역방향 시그널 필터링 (하락 추세에서 매수 차단, 상승 추세에서 매도 차단)
+        # ① 추세 역방향 시그널 필터링 (강한 추세에서만)
         if trend == "down":
             buy_signals = []  # 하락 추세에서 매수 금지
         elif trend == "up":
             sell_signals = []  # 상승 추세에서 매도 금지
+
+        # ② 반등 확인 필터: "떨어지는 칼날 잡기" 방지
+        # 역추세 매수(BB하한, RSI과매도, VWAP하회)는 반등 시작 확인 필수
+        if buy_signals and not self._confirm_reversal_up(buf):
+            buy_signals = []
+        if sell_signals and not self._confirm_reversal_down(buf):
+            sell_signals = []
 
         buy_weight = sum(self._weights.get(s["strategy"], 1.0) for s in buy_signals)
         sell_weight = sum(self._weights.get(s["strategy"], 1.0) for s in sell_signals)
@@ -744,15 +788,15 @@ class RiskManager:
         if not market_ok:
             return False, msg
 
-        # 시간대 필터 (101건 분석 결과):
-        # - 09시 19건 -7,288원 (승률 32%, 특히 09:00~09:15 장초반 함정)
-        # - 11시 14건 -3,804원 (승률 14%, 점심 전 최악)
-        # - 15시 6건 +477원 (승률 33%, 유일한 흑자)
+        # 시간대 필터 (완화):
+        # - 09:00~09:05만 차단 (동시호가 직후 극심 변동)
+        # - 11:00~11:30 저승률 구간 차단 유지
+        # 09:05 이후는 반등확인 필터 + 종목블랙리스트로 함정 회피
         from datetime import datetime as _dt
         now = _dt.now()
         hm = now.hour * 100 + now.minute
-        if 900 <= hm < 915:
-            return False, f"장초반 변동성 회피 ({now.strftime('%H:%M')})"
+        if 900 <= hm < 905:
+            return False, f"동시호가직후 5분 회피 ({now.strftime('%H:%M')})"
         if 1100 <= hm < 1130:
             return False, f"점심전 저승률 구간 회피 ({now.strftime('%H:%M')})"
 
@@ -780,12 +824,12 @@ class RiskManager:
         return True, "OK"
 
     def record_trade_result(self, code: str, pnl: float):
-        """매매 결과 기록 + 종목별 함정 탐지"""
+        """매매 결과 기록 + 종목별 함정 탐지 (강화)"""
         if pnl <= 0:
             self._code_loss_count[code] = self._code_loss_count.get(code, 0) + 1
             self._code_total_loss[code] = self._code_total_loss.get(code, 0) + abs(pnl)
-            # 연속 3패 OR 누적 손실 2000원 초과 → 블랙리스트
-            if self._code_loss_count[code] >= 3 or self._code_total_loss.get(code, 0) > 2000:
+            # 연속 2패 OR 누적 손실 1500원 초과 → 블랙리스트 (092790 -6,261원 반복 방지)
+            if self._code_loss_count[code] >= 2 or self._code_total_loss.get(code, 0) > 1500:
                 self._code_blacklist.add(code)
                 logger.info(f"[블랙리스트] {code} 추가 "
                             f"(연속손실 {self._code_loss_count[code]}회, "
