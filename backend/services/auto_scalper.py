@@ -792,21 +792,32 @@ class RiskManager:
             else:
                 return f"익절 ({pnl_pct:.2f}%)"
 
-        # 트레일링 스탑 (수수료 0.21% 이상 수익일 때만 작동 → 수수료 손실 방지)
-        min_profit_for_trailing = 0.25  # 왕복수수료(0.21%) + 여유분
+        # 트레일링 스탑 (Let Profits Run — 수익 구간별 차등 트레일링폭)
+        # 단계적 접근: 큰 수익일수록 더 넓은 트레일링으로 수익 극대화
+        # - 0.6%~1.0% 수익: trailing_stop_pct 원래 값 (수익 확보 모드)
+        # - 1.0%~2.0% 수익: trailing_stop_pct * 1.5 (상승 추세 따라가기)
+        # - 2.0% 이상: trailing_stop_pct * 2.0 (큰 수익 극대화)
+        min_profit_for_trailing = 0.60  # 왕복수수료 대비 3배 여유 (최소 이 정도 수익은 확보)
+        if pnl_pct >= 2.0:
+            dynamic_trail = self.config.trailing_stop_pct * 2.0
+        elif pnl_pct >= 1.0:
+            dynamic_trail = self.config.trailing_stop_pct * 1.5
+        else:
+            dynamic_trail = self.config.trailing_stop_pct
+
         if self.config.use_trailing_stop and pos.side == Side.BUY:
             if current_price > pos.highest_since_entry:
                 pos.highest_since_entry = current_price
-            trailing_stop = pos.highest_since_entry * (1 - self.config.trailing_stop_pct / 100)
+            trailing_stop = pos.highest_since_entry * (1 - dynamic_trail / 100)
             if current_price <= trailing_stop and pnl_pct > min_profit_for_trailing:
-                return f"트레일링스탑 (고점 {pos.highest_since_entry}→현재 {current_price})"
+                return f"트레일링스탑 (피크 {pos.peak_pnl_pct:.2f}%→현재 {pnl_pct:+.2f}%, 폭 {dynamic_trail:.2f}%)"
 
         if self.config.use_trailing_stop and pos.side == Side.SELL:
             if current_price < pos.lowest_since_entry:
                 pos.lowest_since_entry = current_price
-            trailing_stop = pos.lowest_since_entry * (1 + self.config.trailing_stop_pct / 100)
+            trailing_stop = pos.lowest_since_entry * (1 + dynamic_trail / 100)
             if current_price >= trailing_stop and pnl_pct > min_profit_for_trailing:
-                return f"트레일링스탑 (저점 {pos.lowest_since_entry}→현재 {current_price})"
+                return f"트레일링스탑 (피크 {pos.peak_pnl_pct:.2f}%→현재 {pnl_pct:+.2f}%, 폭 {dynamic_trail:.2f}%)"
 
         # Tier 4: 안전망 시간 — 수수료 손실 구간에서는 강제청산 금지
         # 수수료 구간(-0.25% ~ +0.25%)이면 stop_loss / take_profit이 결정할 때까지 보유
