@@ -365,14 +365,21 @@ class StrategyEngine:
             pass
 
     def get_trend(self, buf: TickBuffer) -> str:
-        """최근 틱 데이터로 단기 추세 판단 (up/down/neutral)"""
+        """최근 틱 데이터로 단기 추세 판단 (up/down/neutral)
+        강한 추세에서만 방향 반환 (EMA10-EMA20 괴리율 0.15% 이상)
+        """
         prices = buf.prices(50)
         if len(prices) < 20:
             return "neutral"
-        # EMA 20 기울기로 추세 판단
         ema20 = float(np.mean(prices[-20:]))
         ema10 = float(np.mean(prices[-10:]))
         price = float(prices[-1])
+        if ema20 <= 0:
+            return "neutral"
+        # 강한 추세 임계값: EMA 괴리율 0.15% 이상
+        diff_pct = abs(ema10 - ema20) / ema20 * 100
+        if diff_pct < 0.15:
+            return "neutral"
         if ema10 > ema20 and price > ema10:
             return "up"
         elif ema10 < ema20 and price < ema10:
@@ -996,19 +1003,19 @@ class RiskManager:
 
         orig = self._original_config_snapshot
 
-        # 규칙 1: 연속 손실 → 단계별 방어 모드
-        if self._consecutive_losses >= 5:
-            # 연속 5패: 거래 일시 중단 (60초 쿨다운)
-            self.config.cooldown_seconds = 60
+        # 규칙 1: 연속 손실 → 단계별 방어 모드 (완화: 8패/5패 기준)
+        if self._consecutive_losses >= 8:
+            # 연속 8패: 강력방어 (30초 쿨다운)
+            self.config.cooldown_seconds = 30
             self.config.max_investment_per_trade = max(
                 100_000, int(orig["max_investment_per_trade"] * 0.5))
             logger.info(f"[AdaptiveTune] 강력방어: 연속 {self._consecutive_losses}패 "
-                        f"→ CD=60s, 투자금={self.config.max_investment_per_trade:,}")
-        elif self._consecutive_losses >= 3:
-            # 연속 3패: 쿨다운 확대
-            self.config.cooldown_seconds = min(30, orig["cooldown_seconds"] * 3)
+                        f"→ CD=30s, 투자금={self.config.max_investment_per_trade:,}")
+        elif self._consecutive_losses >= 5:
+            # 연속 5패: 가벼운 방어 (쿨다운 1.5배, 투자금 0.8배)
+            self.config.cooldown_seconds = min(20, int(orig["cooldown_seconds"] * 1.5))
             self.config.max_investment_per_trade = max(
-                100_000, int(orig["max_investment_per_trade"] * 0.7))
+                100_000, int(orig["max_investment_per_trade"] * 0.8))
             logger.info(f"[AdaptiveTune] 방어모드: 연속 {self._consecutive_losses}패 "
                         f"→ CD={self.config.cooldown_seconds:.1f}s, "
                         f"투자금={self.config.max_investment_per_trade:,}")
