@@ -19,6 +19,8 @@ class KiwoomWebSocketManager:
         self.subscribed_codes = set()
         # 재연결 시 복구용 백업 (connect()에서 subscribed_codes를 clear하기 전에 여기로 옮김)
         self._pending_resubscribe: set = set()
+        # 다음 재연결까지 대기 초(특수 이벤트 후 일시 백오프). run()에서 소모.
+        self._reconnect_backoff: int = 0
 
         # Debug: recent WS messages log
         from collections import deque
@@ -159,10 +161,17 @@ class KiwoomWebSocketManager:
                     code = response.get('code')
                     msg = response.get('message', '')
                     logger.error(f"WS SYSTEM ERROR [{code}]: {msg}")
-                    # If R10001 (App key error, usually mock api key trying to access real ws), stop reconnecting
+                    # R10001은 메시지에 따라 의미가 다름:
+                    #  - "동일한 App key로 접속" → 중복 세션 (일시적, 재연결 필요)
+                    #  - 그 외 → 실제 키 오류 (영구 차단)
                     if code == 'R10001':
-                        logger.error("Stopping WS reconnect due to invalid App Key for WebSockets.")
-                        await self.disconnect(permanent=True)
+                        if '동일한' in msg or '중복' in msg or 'App key' in msg and '접속' in msg:
+                            logger.warning("[WS] 중복 세션 감지 → 30초 후 재연결 시도")
+                            self._reconnect_backoff = 30
+                            await self.disconnect(permanent=False)
+                        else:
+                            logger.error("Stopping WS reconnect due to invalid App Key for WebSockets.")
+                            await self.disconnect(permanent=True)
 
                 elif response.get('trnm') == 'REG':
                     logger.info(f"WS REG response: return_code={response.get('return_code')}, msg={response.get('return_msg')}")
@@ -319,8 +328,12 @@ class KiwoomWebSocketManager:
             if not self.keep_running:
                 break
 
-            # Use longer delay when auth is known to be failing
-            delay = 60 if not kiwoom.is_auth_available else 2
+            # 특수 백오프가 설정돼 있으면 우선 사용 (예: R10001 중복세션 → 30s)
+            if self._reconnect_backoff > 0:
+                delay = self._reconnect_backoff
+                self._reconnect_backoff = 0
+            else:
+                delay = 60 if not kiwoom.is_auth_available else 2
             logger.info(f"WS reconnecting in {delay}s...")
             await asyncio.sleep(delay)
 
