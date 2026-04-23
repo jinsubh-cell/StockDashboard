@@ -17,6 +17,8 @@ class KiwoomWebSocketManager:
         self.keep_running = True
         self.logged_in_event = asyncio.Event()
         self.subscribed_codes = set()
+        # 재연결 시 복구용 백업 (connect()에서 subscribed_codes를 clear하기 전에 여기로 옮김)
+        self._pending_resubscribe: set = set()
 
         # Debug: recent WS messages log
         from collections import deque
@@ -30,6 +32,23 @@ class KiwoomWebSocketManager:
         # Order book (호가) data: {"005930": {"bid": price, "ask": price, "bid_qty": qty, "ask_qty": qty, ...}}
         self.orderbook_data = {}
 
+        # Execution (체결) data: {"005930": {"volume": qty, "price": price, "updated_at": timestamp}}
+        self.execution_data = {}
+
+        # Watchdog: last time a message was received from the WS server
+        self.last_msg_time = 0.0
+        # Watchdog timeout: if no message received for this many seconds, force reconnect
+        self.watchdog_timeout = 120
+
+        # Post-login callbacks (재연결 후 자동 재구독 등)
+        # 각 callback은 coroutine function. LOGIN 성공 직후 create_task로 실행.
+        self._post_login_callbacks: list = []
+
+    def register_post_login_callback(self, coro_func):
+        """LOGIN 성공 시 호출할 async 콜백 등록. 중복 등록 방지."""
+        if coro_func not in self._post_login_callbacks:
+            self._post_login_callbacks.append(coro_func)
+
     async def connect(self):
         # Check if Kiwoom auth is available before attempting WS connection
         if not kiwoom.is_auth_available:
@@ -37,8 +56,13 @@ class KiwoomWebSocketManager:
             self.connected = False
             return
 
-        # Clear stale state
+        # Clear stale state. 이전 구독은 _pending_resubscribe로 백업해두고
+        # LOGIN 성공 직후 자동 재구독한다 (외부 콜백 유무와 무관하게 WS 레이어에서 복구 보장)
         self.logged_in_event.clear()
+        if self.subscribed_codes:
+            self._pending_resubscribe = set(self.subscribed_codes)
+            logger.info(f"[WS] 재연결 대비 구독 백업: {len(self._pending_resubscribe)}개")
+        self.subscribed_codes.clear()
 
         try:
             # Always try to get a fresh/valid token before connecting
@@ -76,9 +100,12 @@ class KiwoomWebSocketManager:
         logger.debug(f'WS Sent: {message}')
 
     async def receive_messages(self):
+        import time
+        self.last_msg_time = time.time()
         while self.keep_running and self.connected and self.websocket is not None:
             try:
-                response = json.loads(await self.websocket.recv())
+                response = json.loads(await asyncio.wait_for(self.websocket.recv(), timeout=30.0))
+                self.last_msg_time = time.time()
                 self.ws_msg_count += 1
                 trnm = response.get('trnm', 'UNKNOWN')
                 if trnm == 'REAL':
@@ -112,8 +139,18 @@ class KiwoomWebSocketManager:
                     else:
                         logger.info('WS Login Successful.')
                         self.logged_in_event.set()
-                        # Once logged in, we can start registering items if needed automatically
-                        # Registration logic should be handled by the caller or a separate manager
+                        # 1) WS 레이어 자체 자동 재구독 (외부 콜백 실패에도 견고)
+                        if self._pending_resubscribe:
+                            codes = list(self._pending_resubscribe)
+                            self._pending_resubscribe = set()
+                            logger.info(f"[WS] 재연결 자동 재구독 실행: {len(codes)}개 {codes[:5]}...")
+                            asyncio.create_task(self.subscribe_stocks(codes, append=False))
+                        # 2) Post-login 콜백 실행 (auto_scalper 등 외부 훅)
+                        for cb in list(self._post_login_callbacks):
+                            try:
+                                asyncio.create_task(cb())
+                            except Exception as cb_err:
+                                logger.error(f"WS post-login callback error: {cb_err}")
 
                 elif response.get('trnm') == 'PING':
                     await self.send_message(response)
@@ -243,6 +280,23 @@ class KiwoomWebSocketManager:
                                 except Exception as err:
                                     logger.warning(f"Error parsing WS REAL 0B item: {err}")
 
+            except asyncio.TimeoutError:
+                # No message received for 30s — check total watchdog time
+                import time
+                elapsed = time.time() - self.last_msg_time
+                logger.warning(f"WS recv timeout (no msg for {elapsed:.0f}s)")
+                if elapsed > self.watchdog_timeout:
+                    logger.error(f"WS watchdog triggered: no data for {elapsed:.0f}s. Forcing reconnect.")
+                    self.connected = False
+                    if self.websocket:
+                        try:
+                            await self.websocket.close()
+                        except Exception:
+                            pass
+                        self.websocket = None
+                    break
+                # Otherwise keep waiting (PING may have reset things)
+                continue
             except websockets.ConnectionClosed:
                 logger.warning('Kiwoom WS Server Connection Closed.')
                 self.connected = False
@@ -266,7 +320,7 @@ class KiwoomWebSocketManager:
                 break
 
             # Use longer delay when auth is known to be failing
-            delay = 60 if not kiwoom.is_auth_available else 5
+            delay = 60 if not kiwoom.is_auth_available else 2
             logger.info(f"WS reconnecting in {delay}s...")
             await asyncio.sleep(delay)
 

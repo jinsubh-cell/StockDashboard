@@ -129,6 +129,14 @@ class Position:
     highest_since_entry: int = 0  # 트레일링 스탑용
     lowest_since_entry: int = 999999999
     strategy: str = ""
+    # ── 근거 소멸 청산(Tier 2) + 본전 보호(Tier 3) 용 진입 시점 메타 ──
+    entry_strategies: list = field(default_factory=list)  # ["volume_spike","trade_intensity",...]
+    entry_volume_baseline: float = 0.0   # 진입 시점 기준 거래량 평균 (volume_spike 판정용)
+    entry_intensity: float = 1.0         # 진입 시점 체결강도 (trade_intensity 판정용)
+    entry_imbalance_ratio: float = 1.0   # 진입 시점 매수/매도 호가비 (orderbook_imbalance 판정용)
+    entry_bb_mid: float = 0.0            # 진입 시점 볼린저 중심선 (bollinger_scalp 판정용)
+    entry_rsi: float = 50.0              # 진입 시점 RSI (rsi_extreme 판정용)
+    peak_pnl_pct: float = 0.0            # 보유 중 최고 수익률 (본전 보호용)
 
 @dataclass
 class TradeResult:
@@ -222,9 +230,22 @@ class AutoScalpConfig:
     use_trailing_stop: bool = True
     max_position_count: int = 3
     max_daily_loss: float = 50_000        # 일일 손실한도 5만원
-    max_hold_seconds: float = 300         # 5분 최대 보유
+    max_hold_seconds: float = 600         # 10분 안전망 (Tier 4): 스캘핑에서 시간은 '알람'이지 '트리거'가 아님
     cooldown_seconds: float = 3           # 3초 쿨다운
     max_daily_trades: int = 50            # 일일 최대 거래 횟수
+
+    # ── Tier 2: 진입 근거 소멸 청산 (signal invalidation exit) ──
+    # 시그널이 죽으면 시간에 관계없이 청산. 단 스캘핑의 본질은 "근거가 살아있는 한 보유".
+    exit_on_signal_loss: bool = True
+    signal_loss_volume_recovery: float = 1.2   # volume_spike: 최근 5틱 평균이 기준의 1.2배 이하로 회귀 시
+    signal_loss_intensity_drop: float = 0.5    # trade_intensity: 진입 시 대비 50% 이하 추락 시
+    signal_loss_imbalance_flip: float = 1.0    # orderbook_imbalance: 호가비 1.0 이하로 역전 시
+
+    # ── Tier 3: 본전 보호 (breakeven protection) ──
+    # 한 번이라도 피크에 다녀왔으면 이익을 손실로 만들지 않음.
+    breakeven_protect_enabled: bool = True
+    breakeven_protect_peak_pct: float = 0.30   # 보유 중 최고 수익률이 이 값 이상이었고
+    breakeven_protect_tolerance: float = 0.05  # 현재가 본전±tolerance(%) 권으로 돌아오면 즉시 청산
 
     # ── 종목 로테이션 ──
     rotation_interval_seconds: float = 600  # 10분마다 성과 평가
@@ -343,6 +364,21 @@ class StrategyEngine:
         except Exception:
             pass
 
+    def get_trend(self, buf: TickBuffer) -> str:
+        """최근 틱 데이터로 단기 추세 판단 (up/down/neutral)"""
+        prices = buf.prices(50)
+        if len(prices) < 20:
+            return "neutral"
+        # EMA 20 기울기로 추세 판단
+        ema20 = float(np.mean(prices[-20:]))
+        ema10 = float(np.mean(prices[-10:]))
+        price = float(prices[-1])
+        if ema10 > ema20 and price > ema10:
+            return "up"
+        elif ema10 < ema20 and price < ema10:
+            return "down"
+        return "neutral"
+
     def evaluate(self, code: str, buf: TickBuffer, orderbook: dict) -> List[dict]:
         """모든 활성 전략 평가 → 시그널 리스트 반환"""
         signals = []
@@ -390,13 +426,22 @@ class StrategyEngine:
 
         return signals
 
-    def get_consensus(self, signals: List[dict]) -> Optional[dict]:
-        """가중치 기반 컨센서스: 전략 weight 합계 >= min_consensus 이면 진입"""
+    def get_consensus(self, signals: List[dict], buf: TickBuffer = None) -> Optional[dict]:
+        """가중치 기반 컨센서스 + 추세 필터: 역추세 진입 차단"""
         if not signals:
             return None
 
+        # 추세 판단
+        trend = self.get_trend(buf) if buf else "neutral"
+
         buy_signals = [s for s in signals if s["side"] == Side.BUY]
         sell_signals = [s for s in signals if s["side"] == Side.SELL]
+
+        # 추세 역방향 시그널 필터링 (하락 추세에서 매수 차단, 상승 추세에서 매도 차단)
+        if trend == "down":
+            buy_signals = []  # 하락 추세에서 매수 금지
+        elif trend == "up":
+            sell_signals = []  # 상승 추세에서 매도 금지
 
         buy_weight = sum(self._weights.get(s["strategy"], 1.0) for s in buy_signals)
         sell_weight = sum(self._weights.get(s["strategy"], 1.0) for s in sell_signals)
@@ -407,7 +452,7 @@ class StrategyEngine:
                 "side": Side.BUY,
                 "strategy": f"consensus({','.join(strategies)})",
                 "strength": round(buy_weight, 1),
-                "reason": f"매수 합의 (가중치 {buy_weight:.1f} >= {self.config.min_consensus})",
+                "reason": f"매수 합의 (가중치 {buy_weight:.1f} >= {self.config.min_consensus}, 추세={trend})",
             }
 
         if sell_weight >= self.config.min_consensus:
@@ -416,7 +461,7 @@ class StrategyEngine:
                 "side": Side.SELL,
                 "strategy": f"consensus({','.join(strategies)})",
                 "strength": round(sell_weight, 1),
-                "reason": f"매도 합의 (가중치 {sell_weight:.1f} >= {self.config.min_consensus})",
+                "reason": f"매도 합의 (가중치 {sell_weight:.1f} >= {self.config.min_consensus}, 추세={trend})",
             }
 
         return None
@@ -708,13 +753,24 @@ class RiskManager:
         return True, "OK"
 
     def check_exit(self, pos: Position, current_price: int) -> Optional[str]:
-        """청산 조건 확인"""
+        """청산 조건 확인 (Tier 1 하드룰 + Tier 4 안전망 시간)"""
         if pos.side == Side.BUY:
             pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
         else:
             pnl_pct = (pos.entry_price - current_price) / pos.entry_price * 100
 
-        # 손절
+        # peak 업데이트 (Tier 3 본전 보호용)
+        if pnl_pct > pos.peak_pnl_pct:
+            pos.peak_pnl_pct = pnl_pct
+
+        # Tier 3: 본전 보호 — 피크 갔다 왔으면 이익을 손실로 만들지 않음
+        if self.config.breakeven_protect_enabled:
+            if pos.peak_pnl_pct >= self.config.breakeven_protect_peak_pct:
+                tol = self.config.breakeven_protect_tolerance
+                if pnl_pct <= tol:
+                    return f"본전보호 (피크 +{pos.peak_pnl_pct:.2f}% → 현재 {pnl_pct:+.2f}%)"
+
+        # Tier 1: 손절
         if pnl_pct <= -self.config.stop_loss_pct:
             return f"손절 ({pnl_pct:.2f}%)"
 
@@ -743,10 +799,153 @@ class RiskManager:
             if current_price >= trailing_stop and pnl_pct > min_profit_for_trailing:
                 return f"트레일링스탑 (저점 {pos.lowest_since_entry}→현재 {current_price})"
 
-        # 최대 보유 시간
+        # Tier 4: 안전망 시간 (알람성) — 보유가 너무 길면 최후의 수단으로 청산
+        # NOTE: 스캘핑의 본질은 "근거가 살아있는 한 보유". 시간은 트리거가 아니라 안전망.
         hold_time = time.time() - pos.entry_time
         if hold_time >= self.config.max_hold_seconds:
-            return f"시간초과 ({hold_time:.0f}초)"
+            return f"안전망시간초과 ({hold_time:.0f}초 / 한도 {self.config.max_hold_seconds:.0f}s)"
+
+        return None
+
+    def check_soft_exit(self, pos: Position, current_price: int,
+                         buf: 'TickBuffer', orderbook: dict) -> Optional[str]:
+        """
+        Tier 2: 진입 근거 소멸 청산
+
+        진입 시점의 시그널 근거가 사라지면 청산.
+        - volume_spike로 진입 → 거래량이 기준선으로 회귀하면 청산
+        - trade_intensity로 진입 → 체결강도가 진입 대비 50% 이하 추락 시 청산
+        - orderbook_imbalance로 진입 → 호가비가 1.0 이하로 역전 시 청산
+        - bollinger_scalp로 진입 → 가격이 BB 중심선 복귀 시 청산
+        - rsi_extreme으로 진입 → RSI 50 통과 시 청산
+
+        단, 이익 중(pnl_pct > 0)에는 근거 소멸이라도 트레일링 스탑에 맡김
+        (급하게 튕겨나가지 않도록 - 본전 보호는 이미 Tier 3에서 처리)
+        """
+        if not self.config.exit_on_signal_loss:
+            return None
+        if not pos.entry_strategies:
+            return None
+
+        # BUY 포지션 기준으로만 구현 (SELL은 시스템상 보유 청산만 하므로 해당 없음)
+        if pos.side != Side.BUY:
+            return None
+
+        # 현재 손익
+        pnl_pct = (current_price - pos.entry_price) / pos.entry_price * 100
+
+        # 이익 구간(+0.1% 초과)에서는 트레일링/익절이 담당 - 근거 소멸 청산 skip
+        # 근거 소멸은 "본전 근처 or 소폭 손실"에서 빨리 나오기 위한 것
+        if pnl_pct > 0.10:
+            return None
+
+        # 최소 보유 시간 (진입 직후 노이즈로 청산되는 것 방지): 8초
+        if (time.time() - pos.entry_time) < 8.0:
+            return None
+
+        reasons = []
+        alive_count = 0  # 아직 살아있는 근거 개수
+
+        for strat in pos.entry_strategies:
+            # volume_spike: 최근 거래량이 기준선 근처로 돌아왔나
+            if strat == "volume_spike":
+                volumes = buf.volumes(50) if buf else np.array([])
+                if len(volumes) >= 5 and pos.entry_volume_baseline > 0:
+                    recent = float(np.mean(volumes[-5:]))
+                    ratio = recent / pos.entry_volume_baseline
+                    if ratio <= self.config.signal_loss_volume_recovery:
+                        reasons.append(f"거래량소멸({ratio:.1f}×)")
+                    else:
+                        alive_count += 1
+                else:
+                    alive_count += 1  # 데이터 부족 시 살아있는 것으로 간주
+
+            # trade_intensity: 체결강도 진입 대비 추락
+            elif strat == "trade_intensity":
+                if buf and pos.entry_intensity > 0:
+                    ticks = list(buf.ticks)[-self.config.intensity_window:]
+                    if len(ticks) >= 5:
+                        bv = sv = 0.0
+                        for i in range(1, len(ticks)):
+                            v = ticks[i].volume
+                            if ticks[i].price > ticks[i - 1].price:
+                                bv += v
+                            elif ticks[i].price < ticks[i - 1].price:
+                                sv += v
+                            else:
+                                bv += v * 0.5; sv += v * 0.5
+                        cur_intensity = (bv / sv) if sv > 0 else 10.0
+                        drop_ratio = cur_intensity / pos.entry_intensity
+                        if drop_ratio <= self.config.signal_loss_intensity_drop:
+                            reasons.append(f"체결강도소멸({cur_intensity:.1f}/{pos.entry_intensity:.1f})")
+                        else:
+                            alive_count += 1
+                    else:
+                        alive_count += 1
+                else:
+                    alive_count += 1
+
+            # orderbook_imbalance: 호가비 1.0 이하로 역전
+            elif strat == "orderbook_imbalance":
+                if orderbook:
+                    bid_qty = orderbook.get("bid_qty1", 0) or 0
+                    ask_qty = orderbook.get("ask_qty1", 0) or 0
+                    if ask_qty > 0:
+                        cur_ratio = bid_qty / ask_qty
+                        if cur_ratio <= self.config.signal_loss_imbalance_flip:
+                            reasons.append(f"호가역전({cur_ratio:.2f})")
+                        else:
+                            alive_count += 1
+                    else:
+                        alive_count += 1
+                else:
+                    alive_count += 1
+
+            # bollinger_scalp: BB 중심선 복귀 (매수는 하한에서 진입했으니 중심선 위로 올라오면 소멸)
+            elif strat == "bollinger_scalp":
+                if buf and pos.entry_bb_mid > 0:
+                    if current_price >= pos.entry_bb_mid:
+                        reasons.append(f"BB중심복귀({current_price}≥{int(pos.entry_bb_mid)})")
+                    else:
+                        alive_count += 1
+                else:
+                    alive_count += 1
+
+            # rsi_extreme: 매수 진입 시 과매도였으니 50 통과 시 소멸
+            elif strat == "rsi_extreme":
+                if buf:
+                    rsi_prices = buf.prices(self.config.rsi_period + 10)
+                    if len(rsi_prices) >= self.config.rsi_period + 1:
+                        try:
+                            if HAS_TALIB:
+                                r = talib.RSI(rsi_prices, timeperiod=self.config.rsi_period)
+                                cur_rsi = float(r[-1]) if not np.isnan(r[-1]) else 50.0
+                            else:
+                                deltas = np.diff(rsi_prices)
+                                gains = np.where(deltas > 0, deltas, 0)
+                                losses = np.where(deltas < 0, -deltas, 0)
+                                ag = np.mean(gains[-self.config.rsi_period:])
+                                al = np.mean(losses[-self.config.rsi_period:])
+                                cur_rsi = 100.0 if al == 0 else 100 - (100 / (1 + ag / al))
+                            if cur_rsi >= 50.0:
+                                reasons.append(f"RSI회복({cur_rsi:.0f})")
+                            else:
+                                alive_count += 1
+                        except Exception:
+                            alive_count += 1
+                    else:
+                        alive_count += 1
+                else:
+                    alive_count += 1
+
+            # 기타 전략 (tick_momentum, vwap_deviation, ema_crossover, tick_acceleration):
+            # 별도 진입 메타 저장 안 함 → 살아있는 것으로 간주
+            else:
+                alive_count += 1
+
+        # 모든 진입 근거가 소멸됐을 때만 청산 (하나라도 살아있으면 보유 유지)
+        if reasons and alive_count == 0:
+            return f"근거소멸 ({', '.join(reasons)})"
 
         return None
 
@@ -797,15 +996,21 @@ class RiskManager:
 
         orig = self._original_config_snapshot
 
-        # 규칙 1: 연속 3패 → 방어 모드
-        if self._consecutive_losses >= 3:
-            self.config.stop_loss_pct = max(0.2, orig["stop_loss_pct"] * 0.7)
-            self.config.cooldown_seconds = min(10, orig["cooldown_seconds"] * 2)
+        # 규칙 1: 연속 손실 → 단계별 방어 모드
+        if self._consecutive_losses >= 5:
+            # 연속 5패: 거래 일시 중단 (60초 쿨다운)
+            self.config.cooldown_seconds = 60
+            self.config.max_investment_per_trade = max(
+                100_000, int(orig["max_investment_per_trade"] * 0.5))
+            logger.info(f"[AdaptiveTune] 강력방어: 연속 {self._consecutive_losses}패 "
+                        f"→ CD=60s, 투자금={self.config.max_investment_per_trade:,}")
+        elif self._consecutive_losses >= 3:
+            # 연속 3패: 쿨다운 확대
+            self.config.cooldown_seconds = min(30, orig["cooldown_seconds"] * 3)
             self.config.max_investment_per_trade = max(
                 100_000, int(orig["max_investment_per_trade"] * 0.7))
             logger.info(f"[AdaptiveTune] 방어모드: 연속 {self._consecutive_losses}패 "
-                        f"→ SL={self.config.stop_loss_pct:.2f}%, "
-                        f"CD={self.config.cooldown_seconds:.1f}s, "
+                        f"→ CD={self.config.cooldown_seconds:.1f}s, "
                         f"투자금={self.config.max_investment_per_trade:,}")
 
         # 규칙 2: 연속 3승 → 원래 설정 복원
@@ -963,7 +1168,8 @@ class StockScanner:
         # 4. 체결빈도 (15%) - WS 실시간 데이터 기반
         from services.kiwoom_ws import kiwoom_ws_manager
         tick_freq_score = 50  # 기본값
-        tick_data = kiwoom_ws_manager.execution_data.get(code, {})
+        exec_store = getattr(kiwoom_ws_manager, 'execution_data', {})
+        tick_data = exec_store.get(code, {})
         if tick_data:
             # execution_data에서 최근 체결 건수 추정
             tick_freq_score = min(100, volume / 100000 * 20)
@@ -1094,12 +1300,29 @@ class AutoScalpingSystem:
             "total_gross_pnl": 0.0,
             "total_net_pnl": 0.0,
             "total_commission": 0.0,
+            # 실제 거래 금액 추적 (수수료 제외 전 총액)
+            "total_buy_quantity": 0,   # 매수 체결 수량 누적
+            "total_buy_amount": 0.0,   # 매수 체결 금액 누적 (원)
+            "total_sell_amount": 0.0,  # 매도 체결 금액 누적 (원)
         }
 
         # Tasks
         self._monitor_task = None
         self._rotation_task = None
         self._rescan_task = None
+        self._market_open_task = None  # 09:00 자동 시작 스케줄러
+
+        # 비동기 start 시퀀스의 오류 추적 (라우터에서 조회)
+        self._startup_error: Optional[str] = None
+
+        # 잔고 캐시 (매 틱마다 kt00017/kt00018 폭주 방지)
+        self._balance_cache: Optional[dict] = None
+        self._balance_cache_time: float = 0.0
+        self._balance_cache_ttl: float = 15.0  # 15초 캐시
+
+        # 예수금 부족 전역 쿨다운 (돈 없으면 잠시 진입 자체 중단)
+        self._insufficient_cash_until: float = 0.0
+        self._insufficient_cash_cooldown: float = 60.0  # 60초간 진입 중단
 
     # ── Lifecycle ──
 
@@ -1114,6 +1337,16 @@ class AutoScalpingSystem:
         self.risk.reset_daily()
         self.stats["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # WS 재연결 후 자동 재구독 콜백 등록 (엔진이 살아있는 동안 유지)
+        try:
+            from services.kiwoom_ws import kiwoom_ws_manager
+            kiwoom_ws_manager.register_post_login_callback(self._resubscribe_targets_after_reconnect)
+        except Exception as e:
+            logger.warning(f"[WS 재구독 콜백 등록 실패] {e}")
+
+        # 실계좌 보유 종목 동기화 (유령 포지션 방지)
+        await self._sync_account_holdings()
+
         # 종목 검색
         await self._do_scan()
 
@@ -1126,6 +1359,34 @@ class AutoScalpingSystem:
         logger.info(f"AutoScalper 시작: 감시 종목 {self.scanner.current_targets}")
         return {"success": True, "message": "자동 스캘핑 시작",
                 "targets": self.scanner.current_targets}
+
+    async def _sync_account_holdings(self):
+        """실계좌 보유 종목을 포지션으로 등록 (유령 포지션 방지)"""
+        try:
+            from services.kiwoom_provider import kiwoom
+            loop = asyncio.get_event_loop()
+            balance = await loop.run_in_executor(None, kiwoom.get_account_balance)
+            if not balance or not isinstance(balance, dict):
+                return
+            holdings = balance.get("holdings", [])
+            for h in holdings:
+                code = h.get("code", "")
+                qty = h.get("quantity", 0)
+                price = h.get("avg_price", 0) or h.get("current_price", 0)
+                if code and qty > 0 and code not in self.positions:
+                    # 기존에 추적 안 된 포지션을 Position으로 등록
+                    pos = Position(
+                        code=code, side=Side.BUY,
+                        entry_price=price, quantity=qty,
+                        entry_time=time.time(),
+                        order_no="sync",
+                        stop_loss=price * (1 - self.config.stop_loss_pct / 100),
+                        take_profit=price * (1 + self.config.take_profit_pct / 100),
+                    )
+                    self.positions[code] = pos
+                    logger.info(f"[계좌동기화] {code} {qty}주 @ {price}원 → 포지션 등록")
+        except Exception as e:
+            logger.warning(f"[계좌동기화] 실패 (무시): {e}")
 
     async def stop(self):
         """엔진 중지 (모든 포지션 청산)"""
@@ -1170,13 +1431,26 @@ class AutoScalpingSystem:
             if pos.side == Side.SELL and tick.price < pos.lowest_since_entry:
                 pos.lowest_since_entry = tick.price
 
+            # Tier 1 (하드룰) + Tier 3 (본전 보호) + Tier 4 (안전망 시간) 통합 체크
             exit_reason = self.risk.check_exit(pos, tick.price)
             if exit_reason:
                 self._close_position(code, tick.price, exit_reason)
                 return
 
+            # Tier 2: 진입 근거 소멸 청산 (소프트)
+            from services.kiwoom_ws import kiwoom_ws_manager as _ws_for_exit
+            ob_for_exit = _ws_for_exit.orderbook_data.get(code, {})
+            soft_reason = self.risk.check_soft_exit(pos, tick.price, buf, ob_for_exit)
+            if soft_reason:
+                self._close_position(code, tick.price, soft_reason)
+                return
+
         # 2. 이미 포지션이 있으면 새 진입 안 함
         if code in self.positions:
+            return
+
+        # 2.5. 예수금 부족 전역 쿨다운 — 잔고 없으면 신호/전략 평가까지 전부 스킵 (이벤트 루프 보호)
+        if time.time() < self._insufficient_cash_until:
             return
 
         # 3. 진입 가능 여부 확인
@@ -1194,8 +1468,8 @@ class AutoScalpingSystem:
 
         self.stats["total_signals"] += len(signals)
 
-        # 5. 컨센서스 확인
-        consensus = self.strategy.get_consensus(signals)
+        # 5. 컨센서스 확인 (추세 필터 포함)
+        consensus = self.strategy.get_consensus(signals, buf)
         if not consensus:
             # 시그널은 있지만 합의 미달
             for sig in signals:
@@ -1214,30 +1488,62 @@ class AutoScalpingSystem:
                     pass
             return
 
-        # 6. 룰 기반 진입 필터 (Brain 학습 데이터 활용)
+        # 6. 룰 기반 진입 필터 (Brain 학습 데이터 활용 - 강화)
         try:
             brain_data = trade_brain.brain if trade_brain else {}
             strategy_name = consensus.get("strategy", "")
             strategy_perf = brain_data.get("strategy_scores", {}).get(strategy_name, {})
             tc = strategy_perf.get("trade_count", 0)
-            if tc >= 10:
+
+            if tc >= 5:
                 win_rate = strategy_perf.get("wins", 0) / tc
-                recent_pnls = strategy_perf.get("recent_pnls", [])[-10:]
-                all_losses = all(p <= 0 for p in recent_pnls) if recent_pnls else False
-                if win_rate < 0.2 and all_losses:
-                    # 승률 20% 미만 + 최근 10건 전부 손실 → 진입 거부
+                recent_pnls = strategy_perf.get("recent_pnls", [])[-5:]
+                recent_loss_count = sum(1 for p in recent_pnls if p <= 0)
+
+                # 조건1: 승률 30% 미만 → 진입 거부
+                # 조건2: 최근 5건 중 4건 이상 손실 → 진입 거부
+                # 조건3: 총 손익이 마이너스이고 승률 40% 미만 → 진입 거부
+                total_pnl = strategy_perf.get("total_pnl", 0)
+                if (win_rate < 0.3) or (recent_loss_count >= 4) or (total_pnl < 0 and win_rate < 0.4):
+                    reject_reason = (f"승률 {win_rate:.0%}, 최근5건 중 {recent_loss_count}패, "
+                                     f"누적PnL {total_pnl:+,.0f}")
                     self.signal_log.append({
                         "time": datetime.now().strftime("%H:%M:%S"),
                         "code": code,
                         "side": consensus["side"].value,
                         "strategy": consensus["strategy"],
                         "reason": consensus["reason"],
-                        "action": f"RULE_REJECT: 승률 {win_rate:.0%}, 연속 손실",
+                        "action": f"RULE_REJECT: {reject_reason}",
                     })
-                    logger.info(f"[룰거부] {code} {consensus['side'].value} - 승률 {win_rate:.0%}")
+                    logger.info(f"[룰거부] {code} {consensus['strategy']} - {reject_reason}")
                     return
+
+            # 시간대 필터: 해당 시간대 승률이 극히 나쁘면 거부
+            current_hour = datetime.now().strftime("%H")
+            time_scores = brain_data.get("time_scores", {})
+            time_perf = time_scores.get(current_hour, {})
+            time_tc = time_perf.get("trade_count", 0)
+            if time_tc >= 8:
+                time_wr = time_perf.get("wins", 0) / time_tc
+                if time_wr < 0.25:
+                    logger.info(f"[시간대거부] {current_hour}시 승률 {time_wr:.0%} ({time_tc}건) → 진입 거부")
+                    return
+
         except Exception as e:
             logger.warning(f"[Brain필터] 스킵: {e}")
+
+        # 6-2. 스프레드 검증: 호가 스프레드가 익절 대비 너무 넓으면 거부
+        from services.kiwoom_ws import kiwoom_ws_manager as _ws
+        ob = _ws.orderbook_data.get(code, {})
+        if ob:
+            bid1 = ob.get("bid1", 0) or 0
+            ask1 = ob.get("ask1", 0) or 0
+            if bid1 > 0 and ask1 > 0:
+                spread_pct = (ask1 - bid1) / bid1 * 100
+                # 스프레드가 익절 목표의 40% 이상이면 수익 내기 어려움
+                if spread_pct > self.config.take_profit_pct * 0.4:
+                    logger.info(f"[스프레드거부] {code} 스프레드 {spread_pct:.2f}% > TP의 40%")
+                    return
 
         # 7. 진입 실행
         entry_signal = {
@@ -1257,6 +1563,125 @@ class AutoScalpingSystem:
 
     # ── Position Management ──
 
+    # ── WebSocket 재구독 (재연결 복구용) ──
+
+    async def _resubscribe_targets_after_reconnect(self):
+        """WS LOGIN 성공 시 호출 — 엔진이 감시 중인 종목을 자동 재구독.
+        재연결 직후 subscribed_codes가 비워지므로, 진입/청산 신호를 받으려면 반드시 재구독 필요.
+        """
+        if not self.running:
+            return
+        try:
+            from services.kiwoom_ws import kiwoom_ws_manager
+            targets = list(self.scanner.current_targets or [])
+            if not targets:
+                logger.info("[WS 재구독] 감시 종목 없음 — 건너뜀")
+                return
+            logger.info(f"[WS 재구독] 재연결 감지 → {len(targets)}개 종목 재구독 시도")
+            await kiwoom_ws_manager.subscribe_stocks(targets, append=False)
+            logger.info(f"[WS 재구독] 완료: {targets}")
+        except Exception as e:
+            logger.error(f"[WS 재구독] 실패: {e}")
+
+    # ── 잔고 캐시 (API 폭주 방지) ──
+
+    def _get_cached_balance(self) -> Optional[dict]:
+        """잔고 조회 캐시 (TTL=15초). kt00017/kt00018 동기 HTTP가 매 틱마다 이벤트 루프를 막는 문제 방지."""
+        from services.kiwoom_provider import kiwoom
+        now = time.time()
+        if self._balance_cache is not None and (now - self._balance_cache_time) < self._balance_cache_ttl:
+            return self._balance_cache
+        try:
+            balance = kiwoom.get_account_balance()
+            if isinstance(balance, dict):
+                self._balance_cache = balance
+                self._balance_cache_time = now
+                return balance
+        except Exception as e:
+            logger.warning(f"[잔고 캐시 조회 실패] {e}")
+        # 실패 시 마지막 캐시라도 반환 (None 회피)
+        return self._balance_cache
+
+    def _invalidate_balance_cache(self):
+        """체결/청산 직후 즉시 다음 조회에서 최신 값을 가져오도록 캐시 무효화"""
+        self._balance_cache = None
+        self._balance_cache_time = 0.0
+
+    # ── 진입 시그널 파싱/스냅샷 (Tier 2 청산용) ──
+
+    @staticmethod
+    def _parse_consensus_strategies(strategy_label: str) -> list:
+        """'consensus(volume_spike,trade_intensity)' → ['volume_spike','trade_intensity']"""
+        if not strategy_label:
+            return []
+        if "consensus(" in strategy_label:
+            inner = strategy_label.split("consensus(", 1)[1].rstrip(")")
+            return [s.strip() for s in inner.split(",") if s.strip()]
+        return [strategy_label.strip()]
+
+    def _snapshot_entry_context(self, code: str, buf: TickBuffer) -> dict:
+        """진입 시점의 각 전략 지표값을 스냅샷 — 나중에 '근거 소멸' 판정에 사용"""
+        from services.kiwoom_ws import kiwoom_ws_manager
+        ob = kiwoom_ws_manager.orderbook_data.get(code, {}) or {}
+
+        # 거래량 기준선 (volume_spike 판정용): 최근 50틱 중 앞부분 45틱 평균
+        volumes = buf.volumes(50)
+        if len(volumes) >= 20:
+            volume_baseline = float(np.mean(volumes[:-5])) if len(volumes) > 5 else float(np.mean(volumes))
+        else:
+            volume_baseline = 0.0
+
+        # 체결강도 (trade_intensity 판정용)
+        intensity = 1.0
+        ticks = list(buf.ticks)[-self.config.intensity_window:]
+        if len(ticks) >= 5:
+            bv = sv = 0.0
+            for i in range(1, len(ticks)):
+                v = ticks[i].volume
+                if ticks[i].price > ticks[i - 1].price:
+                    bv += v
+                elif ticks[i].price < ticks[i - 1].price:
+                    sv += v
+                else:
+                    bv += v * 0.5
+                    sv += v * 0.5
+            intensity = (bv / sv) if sv > 0 else 10.0
+
+        # 호가비 (orderbook_imbalance 판정용)
+        bid_qty = ob.get("bid_qty1", 0) or 0
+        ask_qty = ob.get("ask_qty1", 0) or 0
+        imbalance_ratio = (bid_qty / ask_qty) if ask_qty > 0 else 1.0
+
+        # BB 중심선 (bollinger_scalp 판정용)
+        bb_prices = buf.prices(self.config.bb_window)
+        bb_mid = float(np.mean(bb_prices)) if len(bb_prices) >= self.config.bb_window else 0.0
+
+        # RSI (rsi_extreme 판정용)
+        rsi_val = 50.0
+        rsi_prices = buf.prices(self.config.rsi_period + 10)
+        if len(rsi_prices) >= self.config.rsi_period + 1:
+            try:
+                if HAS_TALIB:
+                    r = talib.RSI(rsi_prices, timeperiod=self.config.rsi_period)
+                    rsi_val = float(r[-1]) if not np.isnan(r[-1]) else 50.0
+                else:
+                    deltas = np.diff(rsi_prices)
+                    gains = np.where(deltas > 0, deltas, 0)
+                    losses = np.where(deltas < 0, -deltas, 0)
+                    ag = np.mean(gains[-self.config.rsi_period:])
+                    al = np.mean(losses[-self.config.rsi_period:])
+                    rsi_val = 100.0 if al == 0 else 100 - (100 / (1 + ag / al))
+            except Exception:
+                rsi_val = 50.0
+
+        return {
+            "volume_baseline": volume_baseline,
+            "intensity": intensity,
+            "imbalance_ratio": imbalance_ratio,
+            "bb_mid": bb_mid,
+            "rsi": rsi_val,
+        }
+
     def _open_position(self, code: str, consensus: dict):
         """포지션 진입 (룰 기반)"""
         from services.kiwoom_provider import kiwoom
@@ -1266,7 +1691,15 @@ class AutoScalpingSystem:
             return
 
         price = buf.latest.price
+        if price <= 0:
+            logger.warning(f"[진입 거부] {code} 가격이 0 또는 음수")
+            return
+
         side = consensus["side"]
+
+        # SELL 시그널: 보유 포지션이 없으면 공매도 불가 → 무시
+        if side == Side.SELL and code not in self.positions:
+            return
 
         max_invest = self.config.max_investment_per_trade
 
@@ -1275,6 +1708,35 @@ class AutoScalpingSystem:
             self.config.order_quantity,
             max(1, max_invest // price)
         )
+
+        # 잔고 기반 수량 재조정 (부족 시 가능한 최대 수량으로 축소)
+        # 캐시된 잔고 사용 (매 틱마다 kt00017/kt00018 폭주 방지)
+        try:
+            balance = self._get_cached_balance()
+            if isinstance(balance, dict):
+                available_cash = int(balance.get("cash", 0) or 0)
+            else:
+                available_cash = 0
+            if available_cash > 0 and side == Side.BUY:
+                # 수수료+세금 여유까지 감안해 95% 상한
+                max_by_balance = max(0, int(available_cash * 0.95) // price)
+                if max_by_balance <= 0:
+                    # 예수금 1주 미만 → 전역 쿨다운으로 다른 종목 진입도 잠시 중단
+                    self._insufficient_cash_until = time.time() + self._insufficient_cash_cooldown
+                    logger.warning(
+                        f"[진입 거부] {code} 예수금({available_cash:,}원)이 1주({price:,}원) 금액 미만 "
+                        f"→ 전역 쿨다운 {self._insufficient_cash_cooldown:.0f}초"
+                    )
+                    return
+                if max_by_balance < quantity:
+                    logger.info(f"[수량 축소] {code} 요청 {quantity}주 → 예수금 한도 {max_by_balance}주 (예수금 {available_cash:,}원)")
+                quantity = min(quantity, max_by_balance)
+        except Exception as e:
+            logger.warning(f"[잔고 조회 실패] {code}: {e} → 기존 수량 유지")
+
+        if quantity <= 0:
+            logger.warning(f"[진입 거부] {code} 잔고 부족으로 수량 0")
+            return
 
         # 수수료 대비 수익성 사전 검증
         tp_pct = self.config.take_profit_pct
@@ -1296,6 +1758,35 @@ class AutoScalpingSystem:
         )
 
         if result.get("success"):
+            order_no = result.get("order_no", "")
+
+            # 체결 발생 → 잔고 캐시 무효화 (다음 조회 시 최신 예수금 반영)
+            self._invalidate_balance_cache()
+
+            # 실제 체결 수량/체결가 조회 (요청치가 아닌 실제 체결값을 기록)
+            actual_qty = quantity
+            actual_price = price
+            fill_status = "requested"
+            try:
+                fill = kiwoom.get_order_fill(order_no, max_attempts=3, sleep_sec=0.4)
+                if fill:
+                    actual_qty = int(fill.get("filled_quantity", 0) or 0)
+                    actual_price = float(fill.get("filled_price", 0) or 0)
+                    fill_status = fill.get("status", "filled")
+                    if actual_qty <= 0 or actual_price <= 0:
+                        # 체결 데이터가 비어있으면 요청치 유지
+                        actual_qty = quantity
+                        actual_price = price
+                        fill_status = "pending"
+                else:
+                    fill_status = "pending"
+            except Exception as e:
+                logger.warning(f"[체결 조회 실패] {code}: {e} → 요청 수량/가격으로 기록")
+
+            if actual_qty <= 0:
+                logger.warning(f"[진입 실패] {code} 체결수량 0 - 포지션 미생성")
+                return
+
             # AI 조정값이 있으면 포지션별 SL/TP 적용
             sl_pct = self.config.stop_loss_pct
             tp_pct = self.config.take_profit_pct
@@ -1305,26 +1796,37 @@ class AutoScalpingSystem:
             tp_pct = max(0.3, min(5.0, tp_pct))
 
             if side == Side.BUY:
-                sl = align_price(int(price * (1 - sl_pct / 100)), "down")
-                tp = align_price(int(price * (1 + tp_pct / 100)), "up")
+                sl = align_price(int(actual_price * (1 - sl_pct / 100)), "down")
+                tp = align_price(int(actual_price * (1 + tp_pct / 100)), "up")
             else:
-                sl = align_price(int(price * (1 + sl_pct / 100)), "up")
-                tp = align_price(int(price * (1 - tp_pct / 100)), "down")
+                sl = align_price(int(actual_price * (1 + sl_pct / 100)), "up")
+                tp = align_price(int(actual_price * (1 - tp_pct / 100)), "down")
+
+            # 진입 시점 메타 수집 (Tier 2 근거 소멸 청산용)
+            entry_strategies = self._parse_consensus_strategies(consensus.get("strategy", ""))
+            meta = self._snapshot_entry_context(code, buf)
 
             pos = Position(
-                code=code, side=side, entry_price=price,
-                quantity=quantity, entry_time=time.time(),
-                order_no=result.get("order_no", ""),
+                code=code, side=side, entry_price=actual_price,
+                quantity=actual_qty, entry_time=time.time(),
+                order_no=order_no,
                 stop_loss=sl, take_profit=tp,
-                highest_since_entry=price,
-                lowest_since_entry=price,
+                highest_since_entry=actual_price,
+                lowest_since_entry=actual_price,
                 strategy=consensus["strategy"],
+                entry_strategies=entry_strategies,
+                entry_volume_baseline=meta["volume_baseline"],
+                entry_intensity=meta["intensity"],
+                entry_imbalance_ratio=meta["imbalance_ratio"],
+                entry_bb_mid=meta["bb_mid"],
+                entry_rsi=meta["rsi"],
+                peak_pnl_pct=0.0,
             )
             self.positions[code] = pos
             self.stats["total_trades"] += 1
 
             logger.info(f"[진입] {side.value.upper()} {code} "
-                        f"가격={price:,} 수량={quantity} "
+                        f"요청={quantity}주@{price:,} → 체결={actual_qty}주@{actual_price:,.0f} ({fill_status}) "
                         f"SL={sl:,} TP={tp:,} "
                         f"전략={consensus['strategy']}")
         else:
@@ -1347,23 +1849,45 @@ class AutoScalpingSystem:
             price_type="market",
         )
 
-        # 손익 계산 (수수료 포함)
-        if pos.side == Side.BUY:
-            gross_pnl = (exit_price - pos.entry_price) * pos.quantity
-        else:
-            gross_pnl = (pos.entry_price - exit_price) * pos.quantity
+        # 청산 체결 → 잔고 캐시 무효화 + 예수금 부족 쿨다운 해제 (회수된 현금 반영)
+        self._invalidate_balance_cache()
+        self._insufficient_cash_until = 0.0
 
-        buy_amount = pos.entry_price * pos.quantity
-        sell_amount = exit_price * pos.quantity
+        # 실제 체결가/체결수량 조회 (실패하면 모니터링 가격/보유수량 사용)
+        actual_exit_price = exit_price
+        actual_close_qty = pos.quantity
+        try:
+            close_order_no = result.get("order_no", "") if isinstance(result, dict) else ""
+            if close_order_no:
+                fill = kiwoom.get_order_fill(close_order_no, max_attempts=3, sleep_sec=0.4)
+                if fill:
+                    fq = int(fill.get("filled_quantity", 0) or 0)
+                    fp = float(fill.get("filled_price", 0) or 0)
+                    if fq > 0 and fp > 0:
+                        actual_close_qty = min(pos.quantity, fq)
+                        actual_exit_price = fp
+        except Exception as e:
+            logger.warning(f"[청산 체결 조회 실패] {code}: {e}")
+
+        # 손익 계산 (수수료 포함) - 실제 체결값 기반
+        if pos.side == Side.BUY:
+            gross_pnl = (actual_exit_price - pos.entry_price) * actual_close_qty
+        else:
+            gross_pnl = (pos.entry_price - actual_exit_price) * actual_close_qty
+
+        buy_amount = pos.entry_price * actual_close_qty
+        sell_amount = actual_exit_price * actual_close_qty
+        # 사용하기 쉽도록 exit_price 변수도 체결가로 덮음
+        exit_price = actual_exit_price
         commission = estimate_commission(buy_amount, False) + estimate_commission(sell_amount, True)
         net_pnl = gross_pnl - commission
         pnl_pct = (gross_pnl / buy_amount * 100) if buy_amount > 0 else 0
 
-        # 기록
+        # 기록 (실제 청산 체결수량 반영)
         trade = TradeResult(
             code=code, side=pos.side.value,
             entry_price=pos.entry_price, exit_price=exit_price,
-            quantity=pos.quantity,
+            quantity=actual_close_qty,
             gross_pnl=gross_pnl, net_pnl=net_pnl, commission=commission,
             pnl_pct=round(pnl_pct, 3),
             strategy=pos.strategy,
@@ -1384,18 +1908,30 @@ class AutoScalpingSystem:
 
         # 통계 업데이트
         self.risk.record_trade(net_pnl)
+        self.stats["total_trades"] = self.stats.get("total_trades", 0) + 1
         self.stats["total_gross_pnl"] += gross_pnl
         self.stats["total_net_pnl"] += net_pnl
         self.stats["total_commission"] += commission
+        # 실제 체결 금액 누적 (진입=매수/청산=매도 기준; SELL 포지션도 동일하게 기록)
+        self.stats["total_buy_quantity"] = self.stats.get("total_buy_quantity", 0) + actual_close_qty
+        self.stats["total_buy_amount"] = self.stats.get("total_buy_amount", 0.0) + buy_amount
+        self.stats["total_sell_amount"] = self.stats.get("total_sell_amount", 0.0) + sell_amount
         if net_pnl > 0:
             self.stats["wins"] += 1
         else:
             self.stats["losses"] += 1
 
-        del self.positions[code]
+        # 부분 청산 처리: 잔량이 남으면 포지션 유지, 전량 청산시 제거
+        remaining = pos.quantity - actual_close_qty
+        if remaining > 0:
+            pos.quantity = remaining
+            logger.info(f"[부분 청산] {code} {actual_close_qty}주 체결 / {remaining}주 잔량 유지")
+        else:
+            del self.positions[code]
 
         emoji = "🟢" if net_pnl > 0 else "🔴"
         logger.info(f"[청산] {emoji} {code} {reason} | "
+                    f"체결수량={actual_close_qty}주 체결가={actual_exit_price:,.0f} "
                     f"손익={net_pnl:+,.0f}원 (수수료 {commission:,.0f}원) "
                     f"보유 {trade.hold_seconds}초")
 
@@ -1498,8 +2034,11 @@ class AutoScalpingSystem:
         new_targets = self.scanner.scan(kiwoom)
         new_set = set(new_targets)
 
-        # 새 종목 구독 (subscribe_stocks는 리스트 단위 처리)
-        to_subscribe = list(new_set - old_targets)
+        # 신규 타겟 + 구독이 소실된 기존 타겟을 모두 포함해 구독 보정
+        # (WS 재연결 후 재구독 콜백이 누락된 경우를 대비한 안전망)
+        subscribed = kiwoom_ws_manager.subscribed_codes
+        missing_existing = [c for c in new_set if c not in subscribed]
+        to_subscribe = list(set(missing_existing) | (new_set - old_targets))
         if to_subscribe:
             if kiwoom_ws_manager.connected and kiwoom_ws_manager.logged_in_event.is_set():
                 try:
@@ -1507,7 +2046,10 @@ class AutoScalpingSystem:
                         kiwoom_ws_manager.subscribe_stocks(to_subscribe, append=True),
                         timeout=20.0
                     )
-                    logger.info(f"WebSocket 신규 구독 완료: {to_subscribe}")
+                    lost = set(missing_existing) - (new_set - old_targets)
+                    if lost:
+                        logger.warning(f"[구독복구] 소실된 기존 타겟 재구독: {list(lost)}")
+                    logger.info(f"WebSocket 신규/복구 구독 완료: {to_subscribe}")
                 except asyncio.TimeoutError:
                     logger.warning(f"WebSocket 구독 타임아웃: {to_subscribe}")
             else:
@@ -1541,9 +2083,10 @@ class AutoScalpingSystem:
                     setattr(self.config, k, expected_type(v))
                 except (ValueError, TypeError):
                     pass
-        # 전략 엔진 갱신
+        # 전략 엔진 / 리스크 / 스캐너 전체 갱신
         self.strategy = StrategyEngine(self.config)
         self.risk.config = self.config
+        self.scanner.config = self.config   # 종목 스캔 필터도 즉시 반영
         # 파일에 저장 (서버 재시작 시 유지)
         self.config.save_to_file()
         logger.info("설정 업데이트 + 저장 완료")
@@ -1623,7 +2166,100 @@ class AutoScalpingSystem:
             "config": self.config.to_dict(),
             "active_preset": self.active_preset_name,
             "preset_status": preset_manager.get_status(),
+            "startup_error": self._startup_error,
+            "market_open_scheduler_running": self._market_open_task is not None
+                                              and not self._market_open_task.done(),
         }
+
+    # ── Market-Open Auto Scheduler (09:00 자동 시작) ──
+
+    async def market_open_scheduler(self):
+        """
+        매일 KST 08:58에 깨어나 09:00:00이 되면 자동으로 엔진 시작.
+        이미 실행 중이거나 장 외 시간이면 skip.
+        주말 skip. 한 번 시작에 성공하면 그 날은 더 시도 안 함.
+        """
+        logger.info("[MarketOpenScheduler] 시작 — 매일 09:00 자동 가동 대기")
+        last_triggered_date = None
+
+        while True:
+            try:
+                now = datetime.now()
+                today = now.date()
+
+                # 주말 skip (토=5, 일=6)
+                if now.weekday() >= 5:
+                    # 다음 날 00:05까지 대기
+                    await asyncio.sleep(3600)  # 1시간 단위 체크
+                    continue
+
+                # 오늘 이미 트리거 했으면 다음 날까지 대기
+                if last_triggered_date == today:
+                    # 다음 날 새벽까지 긴 대기
+                    await asyncio.sleep(1800)  # 30분 단위 체크
+                    continue
+
+                # 09:00 이전이면 타이밍 맞춰 대기
+                target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                if now < target:
+                    wait_sec = (target - now).total_seconds()
+                    # 08:58 이후면 1초 단위로 정밀 대기, 그 전이면 60초 단위
+                    if wait_sec > 120:
+                        await asyncio.sleep(min(wait_sec - 120, 300))
+                        continue
+                    # 2분 이내면 정밀 대기
+                    await asyncio.sleep(max(0.5, wait_sec))
+                    # 시간 도달
+                    if self.running:
+                        logger.info("[MarketOpenScheduler] 09:00 도달했으나 이미 실행 중 — skip")
+                        last_triggered_date = today
+                        continue
+                    logger.info("[MarketOpenScheduler] 🕘 09:00 도달 — 자동 시작 트리거")
+                    try:
+                        # 비동기 start 시퀀스 호출
+                        from routers.auto_scalping import _startup_sequence
+                        await _startup_sequence()
+                        last_triggered_date = today
+                        logger.info("[MarketOpenScheduler] ✅ 자동 시작 완료")
+                    except Exception as e:
+                        logger.error(f"[MarketOpenScheduler] 자동 시작 실패: {e}")
+                        # 실패해도 오늘은 더 시도 안 함 (무한 루프 방지)
+                        last_triggered_date = today
+                else:
+                    # 09:00 이후 — 이미 지남 (서버 재시작 등). 장 시간(09:01~15:19)이면 즉시 시작.
+                    if not self.running and now.time() >= dtime(9, 1) and now.time() < dtime(15, 19):
+                        logger.info("[MarketOpenScheduler] 장 시간 진입 후 엔진 꺼진 상태 감지 → 자동 시작")
+                        try:
+                            from routers.auto_scalping import _startup_sequence
+                            await _startup_sequence()
+                            last_triggered_date = today
+                        except Exception as e:
+                            logger.error(f"[MarketOpenScheduler] 장중 재시작 실패: {e}")
+                            last_triggered_date = today
+                    else:
+                        last_triggered_date = today
+                    # 다음 날까지 대기
+                    await asyncio.sleep(1800)
+
+            except asyncio.CancelledError:
+                logger.info("[MarketOpenScheduler] 중단됨")
+                return
+            except Exception as e:
+                logger.error(f"[MarketOpenScheduler] 예외: {e}")
+                await asyncio.sleep(60)
+
+    def ensure_market_open_scheduler(self):
+        """이벤트 루프 위에서 스케줄러 태스크 1회 등록"""
+        if self._market_open_task is not None and not self._market_open_task.done():
+            return
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                self._market_open_task = asyncio.create_task(self.market_open_scheduler())
+                logger.info("[MarketOpenScheduler] 태스크 등록 완료")
+        except RuntimeError:
+            # 이벤트 루프가 아직 없으면 라우터 startup 훅에서 호출
+            pass
 
 
 # ═══════════════════════════════════════════════════════
