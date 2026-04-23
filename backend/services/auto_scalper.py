@@ -744,12 +744,17 @@ class RiskManager:
         if not market_ok:
             return False, msg
 
-        # 장초반 변동성 회피: 09:00~09:15 진입 금지
-        # (분석결과 장초반 특정 종목 5연속 -1,250원씩 총 -6,261원 손실)
+        # 시간대 필터 (101건 분석 결과):
+        # - 09시 19건 -7,288원 (승률 32%, 특히 09:00~09:15 장초반 함정)
+        # - 11시 14건 -3,804원 (승률 14%, 점심 전 최악)
+        # - 15시 6건 +477원 (승률 33%, 유일한 흑자)
         from datetime import datetime as _dt
         now = _dt.now()
-        if now.hour == 9 and now.minute < 15:
+        hm = now.hour * 100 + now.minute
+        if 900 <= hm < 915:
             return False, f"장초반 변동성 회피 ({now.strftime('%H:%M')})"
+        if 1100 <= hm < 1130:
+            return False, f"점심전 저승률 구간 회피 ({now.strftime('%H:%M')})"
 
         # 일일 손실 한도
         if self.daily_pnl <= -self.config.max_daily_loss:
@@ -799,6 +804,18 @@ class RiskManager:
         # peak 업데이트 (Tier 3 본전 보호용)
         if pnl_pct > pos.peak_pnl_pct:
             pos.peak_pnl_pct = pnl_pct
+
+        hold_time = time.time() - pos.entry_time
+
+        # 최소 보유시간 보호: 진입 후 60초 이내는 '극단 손실(-0.8% 이하)'만 청산
+        # (분석: 0-60초 구간 승률 21-22%, 120-180초 구간 승률 40%)
+        MIN_HOLD_BEFORE_EXIT = 60.0
+        if hold_time < MIN_HOLD_BEFORE_EXIT:
+            # 극단 손실일 때만 조기 손절 (진입 직후 급락 보호)
+            if pnl_pct <= -max(self.config.stop_loss_pct * 1.3, 0.8):
+                return f"긴급손절 ({pnl_pct:.2f}%, {hold_time:.0f}초)"
+            # 외에는 보유 유지
+            return None
 
         # Tier 3: 본전 보호 — 피크 갔다 왔으면 이익을 손실로 만들지 않음
         # ⚠️ 수수료(왕복 0.21%) 이상 확보한 상태에서만 작동 (수수료 손실 청산 방지)
@@ -851,7 +868,6 @@ class RiskManager:
 
         # Tier 4: 안전망 시간 — 수수료 손실 구간에서는 강제청산 금지
         # 수수료 구간(-0.25% ~ +0.25%)이면 stop_loss / take_profit이 결정할 때까지 보유
-        hold_time = time.time() - pos.entry_time
         if hold_time >= self.config.max_hold_seconds:
             if pnl_pct <= -COMMISSION_FLOOR or pnl_pct >= COMMISSION_FLOOR:
                 return f"안전망시간초과 ({hold_time:.0f}초 / 한도 {self.config.max_hold_seconds:.0f}s, {pnl_pct:+.2f}%)"
@@ -894,8 +910,9 @@ class RiskManager:
         if pnl_pct > -COMMISSION_FLOOR:
             return None  # 손절선 근처까지 손실이어야 근거소멸 청산 의미 있음
 
-        # 최소 보유 시간 (진입 직후 노이즈로 청산되는 것 방지): 8초
-        if (time.time() - pos.entry_time) < 8.0:
+        # 최소 보유 시간 60초 (분석: 0-60초 구간 승률 21%, 120-180초 승률 40%)
+        # 조기 청산이 손실 주범 → 충분히 기다리도록 강제
+        if (time.time() - pos.entry_time) < 60.0:
             return None
 
         reasons = []
@@ -1540,8 +1557,10 @@ class AutoScalpingSystem:
                                 f"누적 {total_pnl:+,.0f}원 ({tc}건) → 필터 통과")
                     bypass_filter = True
 
-            # ── (B) 표본 충분 시 저승률 거부 (10건으로 완화)
-            if not bypass_filter and tc >= 10:
+            # ── (B) 표본 충분 시 저승률 거부 (5건으로 빠른 반영)
+            # 단일 전략은 10건, 복수 조합은 5건부터 판정
+            min_sample = 5 if strategy_count >= 2 else 10
+            if not bypass_filter and tc >= min_sample:
                 win_rate = strategy_perf.get("wins", 0) / tc
                 recent_pnls = strategy_perf.get("recent_pnls", [])[-10:]
                 recent_loss_count = sum(1 for p in recent_pnls if p <= 0)
@@ -1549,9 +1568,12 @@ class AutoScalpingSystem:
 
                 # 단일 전략이고 승률 30% 미만이면 거부 (복수 조합은 서로 보완 가능성)
                 single_bad = (strategy_count == 1 and win_rate < 0.30)
-                multi_bad = (strategy_count >= 2 and win_rate < 0.20)
-                losing_streak = (recent_loss_count >= 8)
-                chronic_loss = (total_pnl < -3000 and win_rate < 0.35)
+                # 복수 조합: 승률 30% 미만 OR 누적 -2천원 초과 & 승률 35% 미만
+                multi_bad = (strategy_count >= 2 and (
+                    win_rate < 0.30 or (total_pnl < -2000 and win_rate < 0.35)
+                ))
+                losing_streak = (recent_loss_count >= 7)
+                chronic_loss = (total_pnl < -3000 and win_rate < 0.40)
 
                 if single_bad or multi_bad or losing_streak or chronic_loss:
                     reject_reason = (f"승률 {win_rate:.0%}, 최근10건 중 {recent_loss_count}패, "
